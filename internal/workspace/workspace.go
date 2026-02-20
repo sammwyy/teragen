@@ -9,10 +9,24 @@ import (
 	"github.com/sammwy/teragen/internal/ai"
 )
 
+type FileChange struct {
+	Path string `json:"path"`
+	Diff string `json:"diff"`
+}
+
+type Snapshot struct {
+	ID        string       `json:"id"`
+	PrevID    string       `json:"prev_id,omitempty"`
+	NextID    string       `json:"next_id,omitempty"`
+	Timestamp string       `json:"timestamp"`
+	Files     []FileChange `json:"files"`
+}
+
 type ChatSession struct {
-	ID          string       `json:"id"`
-	Messages    []ai.Message `json:"messages"`
-	TotalTokens int          `json:"total_tokens"`
+	ID             string       `json:"id"`
+	Messages       []ai.Message `json:"messages"`
+	TotalTokens    int          `json:"total_tokens"`
+	LastSnapshotID string       `json:"last_snapshot_id,omitempty"`
 }
 
 type AgentSession struct {
@@ -36,10 +50,15 @@ func (w *Workspace) GetChatsDir() string {
 	return filepath.Join(w.GetTeragenDir(), "_chats")
 }
 
+func (w *Workspace) GetSnapsDir() string {
+	return filepath.Join(w.GetTeragenDir(), "_snaps")
+}
+
 func (w *Workspace) EnsureDirectories() error {
 	dirs := []string{
 		w.GetTeragenDir(),
 		w.GetChatsDir(),
+		w.GetSnapsDir(),
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -47,6 +66,28 @@ func (w *Workspace) EnsureDirectories() error {
 		}
 	}
 	return nil
+}
+
+func (w *Workspace) LoadSnapshot(id string) (*Snapshot, error) {
+	path := filepath.Join(w.GetSnapsDir(), id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
+func (w *Workspace) SaveSnapshot(snap *Snapshot) error {
+	path := filepath.Join(w.GetSnapsDir(), snap.ID+".json")
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
 
 func (w *Workspace) LoadChat(chatID string) (*ChatSession, error) {

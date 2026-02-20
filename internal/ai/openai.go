@@ -40,10 +40,20 @@ func NewOpenRouterClient(cfg config.ProviderConfig, token string) *OpenAICustomC
 type openAIResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		Delta struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -113,6 +123,7 @@ func (c *OpenAICustomClient) ChatCompletion(ctx context.Context, req CompletionR
 
 	return CompletionResponse{
 		Content:     aiResp.Choices[0].Message.Content,
+		ToolCalls:   aiResp.Choices[0].Message.ToolCalls,
 		TotalTokens: aiResp.Usage.TotalTokens,
 	}, nil
 }
@@ -191,8 +202,20 @@ func (c *OpenAICustomClient) StreamCompletion(ctx context.Context, req Completio
 
 				if len(aiResp.Choices) > 0 || aiResp.Usage.TotalTokens > 0 {
 					content := ""
+					var toolCalls []ToolCall
 					if len(aiResp.Choices) > 0 {
 						content = aiResp.Choices[0].Delta.Content
+						for _, tc := range aiResp.Choices[0].Delta.ToolCalls {
+							toolCalls = append(toolCalls, ToolCall{
+								Index: tc.Index,
+								ID:    tc.ID,
+								Type:  tc.Type,
+								Function: ToolCallFunction{
+									Name:      tc.Function.Name,
+									Arguments: tc.Function.Arguments,
+								},
+							})
+						}
 					}
 
 					tokens := aiResp.Usage.TotalTokens
@@ -201,8 +224,9 @@ func (c *OpenAICustomClient) StreamCompletion(ctx context.Context, req Completio
 					}
 
 					ch <- StreamEvent{
-						Content: content,
-						Tokens:  tokens,
+						Content:   content,
+						ToolCalls: toolCalls,
+						Tokens:    tokens,
 					}
 				}
 			}

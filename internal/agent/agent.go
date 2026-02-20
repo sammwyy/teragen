@@ -22,6 +22,7 @@ type Agent struct {
 	ID             string
 	ActiveChatID   string
 	SystemPrompt   string
+	LastSnapshotID string
 }
 
 func NewAgent(session ...workspace.AgentSession) (*Agent, error) {
@@ -62,7 +63,7 @@ func NewAgent(session ...workspace.AgentSession) (*Agent, error) {
 
 	agent := &Agent{
 		Config:       appCfg,
-		Evaluator:    evaluator.NewEvaluator(),
+		Evaluator:    evaluator.NewEvaluator(ws),
 		History:      history,
 		Workspace:    ws,
 		ID:           activeSession.ID,
@@ -114,95 +115,167 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 		Timestamp: now,
 	})
 
-	// Add partial assistant message for streaming
-	assistantMsgIndex := len(a.History)
-	a.History = append(a.History, ai.Message{
-		Role:      "assistant",
-		Content:   "",
-		Timestamp: time.Now().Format(time.RFC3339),
-	})
-
-	// Prepare messages
-	messages := []ai.Message{}
-	if a.SystemPrompt != "" {
-		messages = append(messages, ai.Message{
-			Role:    "system",
-			Content: a.SystemPrompt,
-		})
-	}
-
-	// Filter history to send only role/content
-	for _, m := range a.History {
-		messages = append(messages, ai.Message{
-			Role:    m.Role,
-			Content: m.Content,
-		})
-	}
-
-	req := ai.CompletionRequest{
-		Messages:    messages[:len(messages)-1], // Exclude the empty assistant message
-		Model:       a.ActiveProvider.Model,
-		MaxTokens:   a.ActiveProvider.MaxTokens,
-		Temperature: a.ActiveProvider.Temperature,
-		TopP:        a.ActiveProvider.TopP,
-		Stream:      true,
-		StreamOptions: &ai.StreamOptions{
-			IncludeUsage: true,
-		},
-	}
-
-	rawCh, err := a.Client.StreamCompletion(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
 	ch := make(chan ai.StreamEvent)
+	// Loop for tool call turns
 	go func() {
 		defer close(ch)
-		fullContent := ""
-		totalTokens := 0
 
-		for ev := range rawCh {
-			if ev.Err != nil {
-				ch <- ev
-				return
-			}
-
-			fullContent += ev.Content
-			if ev.Tokens > 0 {
-				totalTokens = ev.Tokens
-			}
-
-			// Update the in-memory history
-			a.History[assistantMsgIndex].Content = fullContent
-			a.History[assistantMsgIndex].Tokens = totalTokens
-
-			ch <- ev
-		}
-
-		// Final save to workspace
 		if a.ActiveChatID == "" {
 			a.ActiveChatID = a.Workspace.NextChatID()
 		}
 
-		// Calculate total session tokens
+		for {
+			// Prepare messages
+			messages := []ai.Message{}
+			if a.SystemPrompt != "" {
+				messages = append(messages, ai.Message{
+					Role:    "system",
+					Content: a.SystemPrompt,
+				})
+			}
+			for _, m := range a.History {
+				messages = append(messages, ai.Message{
+					Role:       m.Role,
+					Content:    m.Content,
+					ToolCalls:  m.ToolCalls,
+					ToolCallID: m.ToolCallID,
+				})
+			}
+
+			req := ai.CompletionRequest{
+				Messages:    messages,
+				Model:       a.ActiveProvider.Model,
+				MaxTokens:   a.ActiveProvider.MaxTokens,
+				Temperature: a.ActiveProvider.Temperature,
+				TopP:        a.ActiveProvider.TopP,
+				Stream:      true,
+				StreamOptions: &ai.StreamOptions{
+					IncludeUsage: true,
+				},
+				Tools: a.Evaluator.ToolRegistry.GetDefinitions(),
+			}
+
+			rawCh, err := a.Client.StreamCompletion(ctx, req)
+			if err != nil {
+				ch <- ai.StreamEvent{Err: err}
+				return
+			}
+
+			fullContent := ""
+			totalTokens := 0
+			var accumulatedToolCalls []ai.ToolCall
+
+			// Add assistant message placeholder
+			assistantMsgIndex := len(a.History)
+			a.History = append(a.History, ai.Message{
+				Role:      "assistant",
+				Content:   "",
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+
+			for ev := range rawCh {
+				if ev.Err != nil {
+					ch <- ev
+					return
+				}
+
+				fullContent += ev.Content
+				if ev.Tokens > 0 {
+					totalTokens = ev.Tokens
+				}
+
+				// Accumulate tool calls
+				for _, tc := range ev.ToolCalls {
+					found := false
+					for i, existing := range accumulatedToolCalls {
+						if existing.Index == tc.Index {
+							if tc.ID != "" {
+								accumulatedToolCalls[i].ID = tc.ID
+							}
+							if tc.Type != "" {
+								accumulatedToolCalls[i].Type = tc.Type
+							}
+							accumulatedToolCalls[i].Function.Name += tc.Function.Name
+							accumulatedToolCalls[i].Function.Arguments += tc.Function.Arguments
+							found = true
+							break
+						}
+					}
+					if !found {
+						accumulatedToolCalls = append(accumulatedToolCalls, tc)
+					}
+				}
+
+				// Update the in-memory history
+				a.History[assistantMsgIndex].Content = fullContent
+				a.History[assistantMsgIndex].Tokens = totalTokens
+				a.History[assistantMsgIndex].ToolCalls = accumulatedToolCalls
+
+				ch <- ev
+			}
+
+			if len(accumulatedToolCalls) > 0 {
+				// Start snapshot session for this chat if not exists
+				if a.Evaluator.ActiveSnapshot == nil {
+					a.Evaluator.ActiveSnapshot = a.Evaluator.StartSnapshotSession(a.ActiveChatID)
+				}
+
+				// Execute tool calls
+				results, err := a.executeToolCalls(accumulatedToolCalls)
+				if err != nil {
+					ch <- ai.StreamEvent{Err: err}
+					return
+				}
+
+				// Add results to history
+				a.History = append(a.History, results...)
+				// Continue loop for another LLM turn
+			} else {
+				// No more tools, we're done with this turn
+				break
+			}
+		}
+
+		// Final snapshot commit
+		if a.Evaluator.ActiveSnapshot != nil {
+			chat, _ := a.Workspace.LoadChat(a.ActiveChatID)
+			prevSnapID := ""
+			if chat != nil {
+				prevSnapID = chat.LastSnapshotID
+			}
+
+			snap, err := a.Evaluator.ActiveSnapshot.Commit(prevSnapID)
+			if err == nil {
+				// Link in chat object
+				a.Evaluator.ActiveSnapshot = nil
+
+				// Update the chat object with the snapshot ID
+				// The snapshot is now linked.
+				// Find any assistant message that called tools and tag it?
+				// Actually, the user said: "guarda el id de la snapsho en el chat objeto. Ademas de eos, guarda el id de la ultima snap en el objeto del chat"
+				// I'll do it at the end.
+				a.LastSnapshotID = snap.ID
+			}
+		}
+
+		// Final save to workspace
 		sessionTotal := 0
 		for _, m := range a.History {
 			sessionTotal += m.Tokens
 		}
 
 		a.Workspace.SaveChat(&workspace.ChatSession{
-			ID:          a.ActiveChatID,
-			Messages:    a.History,
-			TotalTokens: sessionTotal,
+			ID:             a.ActiveChatID,
+			Messages:       a.History,
+			TotalTokens:    sessionTotal,
+			LastSnapshotID: a.LastSnapshotID,
 		})
 
-		// Save agent list (this might be inefficient if done on every message,
-		// but necessary to persist the ActiveChatID for newly created chats)
+		// Save agent list
 		agents, _ := a.Workspace.LoadAgents()
 		found := false
 		for i, sa := range agents {
-			if sa.ID == a.ID { // We need an ID field in Agent struct too
+			if sa.ID == a.ID {
 				agents[i].ActiveChatID = a.ActiveChatID
 				found = true
 				break
@@ -218,6 +291,23 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 	}()
 
 	return ch, nil
+}
+
+func (a *Agent) executeToolCalls(calls []ai.ToolCall) ([]ai.Message, error) {
+	var results []ai.Message
+	for _, call := range calls {
+		res, err := a.Evaluator.ToolRegistry.Call(a.ID, call)
+		if err != nil {
+			res = fmt.Sprintf("Error: %v", err)
+		}
+		results = append(results, ai.Message{
+			Role:       "tool",
+			ToolCallID: call.ID,
+			Content:    res,
+			Timestamp:  time.Now().Format(time.RFC3339),
+		})
+	}
+	return results, nil
 }
 
 func estimateTokens(text string) int {

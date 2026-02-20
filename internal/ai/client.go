@@ -6,11 +6,36 @@ import (
 	"github.com/sammwy/teragen/internal/config"
 )
 
+type Function struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
+}
+
+type Tool struct {
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type ToolCall struct {
+	Index    int              `json:"index"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
 type Message struct {
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Tokens    int    `json:"tokens,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Tokens     int        `json:"tokens,omitempty"`
+	Timestamp  string     `json:"timestamp,omitempty"`
 }
 
 type StreamOptions struct {
@@ -25,18 +50,22 @@ type CompletionRequest struct {
 	TopP          float64        `json:"top_p"`
 	Stream        bool           `json:"stream"`
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+	Tools         []Tool         `json:"tools,omitempty"`
+	ToolChoice    any            `json:"tool_choice,omitempty"`
 }
 
 type CompletionResponse struct {
 	Content     string
+	ToolCalls   []ToolCall
 	TotalTokens int
 }
 
 type StreamEvent struct {
-	Content string
-	Done    bool
-	Tokens  int
-	Err     error
+	Content   string
+	ToolCalls []ToolCall
+	Done      bool
+	Tokens    int
+	Err       error
 }
 
 type AIClient interface {

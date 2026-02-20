@@ -6,15 +6,26 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/sammwy/teragen/internal/workspace"
 )
 
 type Evaluator struct {
-	CWD string
+	CWD            string
+	Workspace      *workspace.Workspace
+	ToolRegistry   *ToolRegistry
+	ActiveSnapshot *SnapshotSession
 }
 
-func NewEvaluator() *Evaluator {
+func NewEvaluator(w *workspace.Workspace) *Evaluator {
 	cwd, _ := os.Getwd()
-	return &Evaluator{CWD: cwd}
+	e := &Evaluator{
+		CWD:          cwd,
+		Workspace:    w,
+		ToolRegistry: NewToolRegistry(),
+	}
+	e.registerFSTools()
+	return e
 }
 
 func (e *Evaluator) ExecuteShell(command string) (string, error) {
@@ -76,4 +87,10 @@ func (e *Evaluator) WriteFile(path string, content string) error {
 	}
 
 	return os.WriteFile(absPath, []byte(content), 0644)
+}
+
+func (e *Evaluator) RecordFile(path string) {
+	if e.ActiveSnapshot != nil {
+		e.ActiveSnapshot.RecordFile(path)
+	}
 }

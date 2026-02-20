@@ -44,8 +44,8 @@ var (
 	PalettePrimary   = []string{ColorPurple, ColorCyan, ColorMagenta}
 	PaletteSecondary = []string{ColorRose, ColorPurple}
 	PaletteAccent    = []string{ColorAccent, ColorRose}
-	PaletteUser      = []string{ColorGreen, ColorCyan}
-	PaletteAgent     = []string{ColorCyan, ColorPurple}
+	PaletteUser      = []string{"#BFFFC7", "#8FFFFF", "#A1E3F9"}
+	PaletteAgent     = []string{"#FF85FF", "#D69DFF", "#B89CFF"}
 
 	GradientBorder = lipgloss.Border{
 		Top:         "─",
