@@ -99,4 +99,81 @@ func (p *Processor) registerDefaultCommands() {
 			return CommandResult{Output: strings.Join(lines, "\n")}, nil
 		},
 	})
+
+	p.Register(Command{
+		Name:        "undo",
+		Description: "Revert the last file changes made by the agent",
+		Handler: func(ctx context.Context, a *agent.Agent, args []string) (CommandResult, error) {
+			if a.ActiveChatID == "" {
+				return CommandResult{Output: "No active chat"}, nil
+			}
+
+			chat, err := a.Workspace.LoadChat(a.ActiveChatID)
+			if err != nil || chat.LastSnapshotID == "" {
+				return CommandResult{Output: "No snapshots to undo"}, nil
+			}
+
+			snap, err := a.Workspace.LoadSnapshot(chat.LastSnapshotID)
+			if err != nil {
+				return CommandResult{Output: fmt.Sprintf("Error loading snapshot: %v", err)}, nil
+			}
+
+			err = a.Evaluator.ApplySnapshot(snap, true)
+			if err != nil {
+				return CommandResult{Output: fmt.Sprintf("Error applying undo: %v", err)}, nil
+			}
+
+			// Update last snapshot
+			chat.LastSnapshotID = snap.PrevID
+			a.Workspace.SaveChat(chat)
+			a.LastSnapshotID = snap.PrevID
+
+			return CommandResult{Output: fmt.Sprintf("Undone snapshot %s. Back to %s.", snap.ID, snap.PrevID)}, nil
+		},
+	})
+
+	p.Register(Command{
+		Name:        "redo",
+		Description: "Redo the next file changes",
+		Handler: func(ctx context.Context, a *agent.Agent, args []string) (CommandResult, error) {
+			if a.ActiveChatID == "" {
+				return CommandResult{Output: "No active chat"}, nil
+			}
+
+			chat, err := a.Workspace.LoadChat(a.ActiveChatID)
+			if err != nil {
+				return CommandResult{}, err
+			}
+
+			// Redo needs finding a snap where PrevID == LastSnapshotID
+			snaps, err := a.Workspace.ListSnapshots(a.ActiveChatID)
+			if err != nil {
+				return CommandResult{Output: "Error listing snapshots"}, nil
+			}
+
+			var nextSnapID string
+			for _, s := range snaps {
+				if s.PrevID == chat.LastSnapshotID {
+					nextSnapID = s.ID
+					break
+				}
+			}
+
+			if nextSnapID == "" {
+				return CommandResult{Output: "Nothing to redo"}, nil
+			}
+
+			snap, _ := a.Workspace.LoadSnapshot(nextSnapID)
+			err = a.Evaluator.ApplySnapshot(snap, false)
+			if err != nil {
+				return CommandResult{Output: fmt.Sprintf("Error applying redo: %v", err)}, nil
+			}
+
+			chat.LastSnapshotID = snap.ID
+			a.Workspace.SaveChat(chat)
+			a.LastSnapshotID = snap.ID
+
+			return CommandResult{Output: fmt.Sprintf("Redone snapshot %s", snap.ID)}, nil
+		},
+	})
 }

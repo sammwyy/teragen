@@ -2,6 +2,8 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,14 +25,22 @@ const (
 	roleCommand
 	roleError
 	roleSystem
+	roleSnapshot
 )
 
 type chatEntry struct {
-	role       role
-	label      string
-	body       string
-	tokenCount int
-	timestamp  string
+	role         role
+	label        string
+	body         string
+	inputTokens  int
+	outputTokens int
+	timestamp    string
+	operations   []string
+	snapshotID   string
+	snapshot     interface{}
+
+	// NEW: Keep track of raw tool calls for rendering
+	toolCalls []ai.ToolCall
 
 	// Cache for rendered output
 	renderedBody  string
@@ -38,16 +48,17 @@ type chatEntry struct {
 }
 
 type Model struct {
-	core          *core.Core
-	activeAgentID string
-	viewport      viewport.Model
-	textInput     textinput.Model
-	spinner       spinner.Model
-	entries       []chatEntry
-	busyAgents    map[string]bool
-	sessionTokens int
-	width         int
-	height        int
+	core                *core.Core
+	activeAgentID       string
+	viewport            viewport.Model
+	textInput           textinput.Model
+	spinner             spinner.Model
+	entries             []chatEntry
+	busyAgents          map[string]bool
+	sessionInputTokens  int
+	sessionOutputTokens int
+	width               int
+	height              int
 
 	inputHistory []string
 	historyIndex int
@@ -184,28 +195,99 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ev := msg.Data.(ai.StreamEvent)
 			m.busyAgents[msg.AgentID] = true
 			if msg.AgentID == m.activeAgentID {
-				lastIdx := len(m.entries) - 1
-				if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent && m.busyAgents[msg.AgentID] {
-					m.entries[lastIdx].body += ev.Content
-					if ev.Tokens > 0 {
-						m.entries[lastIdx].tokenCount = ev.Tokens
-						if a, ok := m.core.Agents[m.activeAgentID]; ok {
-							total := 0
-							for _, hm := range a.History {
-								total += hm.Tokens
+				if ev.Action != "" {
+					lastIdx := len(m.entries) - 1
+					if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent {
+						m.entries[lastIdx].operations = append(m.entries[lastIdx].operations, ev.Action)
+						m.entries[lastIdx].renderedWidth = 0
+					}
+				}
+
+				if ev.ToolName != "" {
+					lastIdx := len(m.entries) - 1
+					if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent {
+						var op string
+						if ev.ToolResult != "" {
+							// Determine the appropriate verb based on tool name
+							verb := "Executed"
+							switch ev.ToolName {
+							case "fs:write":
+								verb = "Written"
+							case "fs:mkdir":
+								verb = "Created directory"
+							case "fs:unlink":
+								verb = "Deleted"
 							}
-							m.sessionTokens = total
+							path := formatToolArgs(ev.ToolName, ev.ToolArgs)
+							op = fmt.Sprintf("%s (%s)", verb, path)
+						} else {
+							op = fmt.Sprintf("Executing %s %s...", ev.ToolName, formatToolArgs(ev.ToolName, ev.ToolArgs))
+						}
+
+						// Update or append
+						found := false
+						search := fmt.Sprintf("Executing %s", ev.ToolName)
+						for i := len(m.entries[lastIdx].operations) - 1; i >= 0; i-- {
+							if strings.HasPrefix(m.entries[lastIdx].operations[i], search) {
+								m.entries[lastIdx].operations[i] = op
+								found = true
+								break
+							}
+						}
+						if !found {
+							m.entries[lastIdx].operations = append(m.entries[lastIdx].operations, op)
+						}
+						m.entries[lastIdx].renderedWidth = 0
+					}
+				}
+
+				if ev.Snapshot != nil {
+					// We don't append a separate entry anymore, we link it to the assistant message
+					lastIdx := len(m.entries) - 1
+					for i := lastIdx; i >= 0; i-- {
+						if m.entries[i].role == roleAgent {
+							m.entries[i].snapshot = ev.Snapshot
+							m.entries[i].renderedWidth = 0
+							break
 						}
 					}
-					m.entries[lastIdx].renderedWidth = 0
-				} else {
-					m.entries = append(m.entries, chatEntry{
-						role:       roleAgent,
-						label:      "  AGENT  ",
-						body:       ev.Content,
-						tokenCount: ev.Tokens,
-						timestamp:  time.Now().Format(time.RFC3339),
-					})
+				}
+
+				if ev.Content != "" {
+					lastIdx := len(m.entries) - 1
+					if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent && m.busyAgents[msg.AgentID] {
+						m.entries[lastIdx].body += ev.Content
+						m.entries[lastIdx].renderedWidth = 0
+					} else {
+						m.entries = append(m.entries, chatEntry{
+							role:      roleAgent,
+							label:     "  AGENT  ",
+							body:      ev.Content,
+							timestamp: time.Now().Format(time.RFC3339),
+						})
+					}
+				}
+
+				if ev.InputTokens > 0 || ev.OutputTokens > 0 {
+					if a, ok := m.core.Agents[m.activeAgentID]; ok {
+						in, out := 0, 0
+						for _, hm := range a.History {
+							in += hm.InputTokens
+							out += hm.OutputTokens
+						}
+						m.sessionInputTokens = in
+						m.sessionOutputTokens = out
+					}
+					// Also update the last assistant message tokens
+					lastIdx := len(m.entries) - 1
+					for i := lastIdx; i >= 0; i-- {
+						if m.entries[i].role == roleAgent {
+							m.entries[i].inputTokens = ev.InputTokens
+							m.entries[i].outputTokens = ev.OutputTokens
+							m.entries[i].renderedWidth = 0
+							break
+						}
+					}
 				}
 			}
 
@@ -214,18 +296,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busyAgents[msg.AgentID] = false
 			if msg.AgentID == m.activeAgentID {
 				if a, ok := m.core.Agents[m.activeAgentID]; ok {
-					total := 0
+					in, out := 0, 0
 					for _, hm := range a.History {
-						total += hm.Tokens
+						in += hm.InputTokens
+						out += hm.OutputTokens
 					}
-					m.sessionTokens = total
+					m.sessionInputTokens = in
+					m.sessionOutputTokens = out
 				}
-				lastIdx := len(m.entries) - 1
-				if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent {
-					if ev.Tokens > 0 {
-						m.entries[lastIdx].tokenCount = ev.Tokens
+				// Final token and content Sync
+				if ev.InputTokens > 0 || ev.OutputTokens > 0 {
+					lastIdx := len(m.entries) - 1
+					for i := lastIdx; i >= 0; i-- {
+						if m.entries[i].role == roleAgent {
+							m.entries[i].inputTokens = ev.InputTokens
+							m.entries[i].outputTokens = ev.OutputTokens
+							m.entries[i].renderedWidth = 0
+							break
+						}
 					}
-					m.entries[lastIdx].renderedWidth = 0
 				}
 			}
 		}
@@ -296,24 +385,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyIndex = len(m.inputHistory)
 
 			uTokens := common.EstimateTokens(input)
-			m.sessionTokens += uTokens
+			m.sessionInputTokens += uTokens
 			ts := time.Now().Format(time.RFC3339)
 			if strings.HasPrefix(input, "/") {
 				parts := strings.Fields(input[1:])
 				m.entries = append(m.entries, chatEntry{
-					role:       roleUser,
-					label:      "   YOU   ",
-					body:       "/" + strings.Join(parts, " "),
-					tokenCount: uTokens,
-					timestamp:  ts,
+					role:        roleUser,
+					label:       "   YOU   ",
+					body:        "/" + strings.Join(parts, " "),
+					inputTokens: uTokens,
+					timestamp:   ts,
 				})
 			} else {
 				m.entries = append(m.entries, chatEntry{
-					role:       roleUser,
-					label:      "   YOU   ",
-					body:       input,
-					tokenCount: uTokens,
-					timestamp:  ts,
+					role:        roleUser,
+					label:       "   YOU   ",
+					body:        input,
+					inputTokens: uTokens,
+					timestamp:   ts,
 				})
 			}
 
@@ -351,7 +440,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) hydrateHistory() {
 	m.entries = []chatEntry{}
-	m.sessionTokens = 0
+	m.sessionInputTokens = 0
+	m.sessionOutputTokens = 0
 
 	if m.activeAgentID == "+" {
 		return
@@ -359,19 +449,70 @@ func (m *Model) hydrateHistory() {
 
 	if a, ok := m.core.Agents[m.activeAgentID]; ok {
 		for _, msg := range a.History {
-			m.sessionTokens += msg.Tokens
+			m.sessionInputTokens += msg.InputTokens
+			m.sessionOutputTokens += msg.OutputTokens
+
+			if msg.Role == "tool" {
+				// Attach tool result to previous assistant message
+				lastIdx := len(m.entries) - 1
+				if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent {
+					op := ""
+					// Find matching tool call to get the name
+					for _, tc := range m.entries[lastIdx].toolCalls {
+						if tc.ID == msg.ToolCallID {
+							op = fmt.Sprintf("Tool %s: %s", tc.Function.Name, msg.Content)
+							break
+						}
+					}
+					if op == "" {
+						op = msg.Content
+					}
+
+					// Update "Executing..." to result if exists
+					found := false
+					for i, existing := range m.entries[lastIdx].operations {
+						if strings.HasPrefix(existing, "Executing") {
+							// If we could match perfectly it would be better, but for now:
+							m.entries[lastIdx].operations[i] = op
+							found = true
+							break
+						}
+					}
+					if !found {
+						m.entries[lastIdx].operations = append(m.entries[lastIdx].operations, op)
+					}
+				}
+				continue
+			}
+
 			r := roleAgent
 			label := "  AGENT  "
 			if msg.Role == "user" {
 				r = roleUser
 				label = "   YOU   "
 			}
+
+			// If last entry was also agent, and this one is assistant with content, maybe merge?
+			// Actually, the LLM often sends ToolCalls then content in separate assistant messages if they are turns.
+			// But for visual cleanless, if the previous one has no body, we might want to merge.
+			lastIdx := len(m.entries) - 1
+			if msg.Role == "assistant" && lastIdx >= 0 && m.entries[lastIdx].role == roleAgent && m.entries[lastIdx].body == "" {
+				m.entries[lastIdx].body = msg.Content
+				m.entries[lastIdx].toolCalls = append(m.entries[lastIdx].toolCalls, msg.ToolCalls...)
+				m.entries[lastIdx].snapshotID = msg.SnapshotID
+				m.entries[lastIdx].outputTokens += msg.OutputTokens
+				continue
+			}
+
 			m.entries = append(m.entries, chatEntry{
-				role:       r,
-				label:      label,
-				body:       msg.Content,
-				tokenCount: msg.Tokens,
-				timestamp:  msg.Timestamp,
+				role:         r,
+				label:        label,
+				body:         msg.Content,
+				inputTokens:  msg.InputTokens,
+				outputTokens: msg.OutputTokens,
+				timestamp:    msg.Timestamp,
+				snapshotID:   msg.SnapshotID,
+				toolCalls:    msg.ToolCalls,
 			})
 		}
 	}
@@ -415,4 +556,37 @@ func (m *Model) switchAgent(delta int) (tea.Model, tea.Cmd) {
 	m.hydrateHistory()
 	m.refreshViewport()
 	return m, nil
+}
+
+func formatToolArgs(name, args string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		return ""
+	}
+
+	switch name {
+	case "fs:write", "fs:read", "fs:modify", "fs:unlink":
+		if v, ok := m["file"].(string); ok {
+			return v
+		}
+		if v, ok := m["target"].(string); ok {
+			return v
+		}
+		if v, ok := m["name"].(string); ok {
+			return v
+		}
+	case "fs:ls", "fs:mkdir", "fs:rmdir":
+		if v, ok := m["target"].(string); ok {
+			return v
+		}
+		if v, ok := m["name"].(string); ok {
+			return v
+		}
+	case "fs:move":
+		old, _ := m["old"].(string)
+		new, _ := m["new"].(string)
+		return fmt.Sprintf("%s -> %s", old, new)
+	}
+
+	return ""
 }

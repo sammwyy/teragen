@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/sammwy/teragen/internal/workspace"
 )
 
 // SafeJoin joins the workspace root with a path and ensures no path traversal.
@@ -113,6 +115,7 @@ func (e *Evaluator) registerFSTools() {
 		}
 
 		e.RecordFile(path)
+		e.ActiveSnapshot.RecordOp(path, workspace.OpCreate)
 		err = os.WriteFile(path, []byte(content), 0644)
 		if err != nil {
 			return "", err
@@ -166,6 +169,9 @@ func (e *Evaluator) registerFSTools() {
 		if err != nil {
 			return "", err
 		}
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(path, workspace.OpMkdir)
+		}
 		err = os.MkdirAll(path, 0755)
 		if err != nil {
 			return "", err
@@ -189,6 +195,7 @@ func (e *Evaluator) registerFSTools() {
 			return "", err
 		}
 		e.RecordFile(path)
+		e.ActiveSnapshot.RecordOp(path, workspace.OpModify)
 		err = os.WriteFile(path, []byte(content), 0644)
 		return "File modified", err
 	})
@@ -207,6 +214,9 @@ func (e *Evaluator) registerFSTools() {
 			return "", err
 		}
 		e.RecordFile(path)
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(path, workspace.OpDelete)
+		}
 		err = os.Remove(path)
 		return "File deleted", err
 	})
@@ -223,6 +233,9 @@ func (e *Evaluator) registerFSTools() {
 		path, err := e.SafeJoin(name)
 		if err != nil {
 			return "", err
+		}
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(path, workspace.OpRmdir)
 		}
 		err = os.RemoveAll(path)
 		return "Directory removed", err
@@ -246,6 +259,9 @@ func (e *Evaluator) registerFSTools() {
 		dst, err := e.SafeJoin(newPath)
 		if err != nil {
 			return "", err
+		}
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(src, workspace.OpMove, dst)
 		}
 		err = os.Rename(src, dst)
 		return "Moved successfully", err

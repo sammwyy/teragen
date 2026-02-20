@@ -7,8 +7,15 @@ import (
 )
 
 func FmtTokens(n int) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.2fM", float64(n)/1000000.0)
+	}
 	if n >= 1000 {
-		return fmt.Sprintf("%.1fK", float64(n)/1000)
+		val := float64(n) / 1000.0
+		if val >= 10.0 {
+			return fmt.Sprintf("%.2fK", val)
+		}
+		return fmt.Sprintf("%.1fK", val)
 	}
 	return fmt.Sprintf("%d", n)
 }

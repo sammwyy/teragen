@@ -30,12 +30,14 @@ type ToolCall struct {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Tokens     int        `json:"tokens,omitempty"`
-	Timestamp  string     `json:"timestamp,omitempty"`
+	Role         string     `json:"role"`
+	Content      string     `json:"content"`
+	ToolCalls    []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID   string     `json:"tool_call_id,omitempty"`
+	InputTokens  int        `json:"input_tokens,omitempty"`
+	OutputTokens int        `json:"output_tokens,omitempty"`
+	Timestamp    string     `json:"timestamp,omitempty"`
+	SnapshotID   string     `json:"snapshot_id,omitempty"`
 }
 
 type StreamOptions struct {
@@ -55,17 +57,24 @@ type CompletionRequest struct {
 }
 
 type CompletionResponse struct {
-	Content     string
-	ToolCalls   []ToolCall
-	TotalTokens int
+	Content      string
+	ToolCalls    []ToolCall
+	InputTokens  int
+	OutputTokens int
 }
 
 type StreamEvent struct {
-	Content   string
-	ToolCalls []ToolCall
-	Done      bool
-	Tokens    int
-	Err       error
+	Content      string
+	ToolCalls    []ToolCall
+	ToolResult   string
+	ToolName     string
+	ToolArgs     string
+	Action       string
+	Snapshot     interface{}
+	Done         bool
+	InputTokens  int
+	OutputTokens int
+	Err          error
 }
 
 type AIClient interface {

@@ -15,6 +15,7 @@ type Evaluator struct {
 	Workspace      *workspace.Workspace
 	ToolRegistry   *ToolRegistry
 	ActiveSnapshot *SnapshotSession
+	OnAction       func(action string)
 }
 
 func NewEvaluator(w *workspace.Workspace) *Evaluator {
@@ -91,6 +92,10 @@ func (e *Evaluator) WriteFile(path string, content string) error {
 
 func (e *Evaluator) RecordFile(path string) {
 	if e.ActiveSnapshot != nil {
+		rel, _ := filepath.Rel(e.Workspace.Root, path)
+		if e.OnAction != nil {
+			e.OnAction(fmt.Sprintf("Recording %s", rel))
+		}
 		e.ActiveSnapshot.RecordFile(path)
 	}
 }

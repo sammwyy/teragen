@@ -9,9 +9,19 @@ import (
 	"github.com/sammwy/teragen/internal/ai"
 )
 
+const (
+	OpCreate = "CREATE"
+	OpModify = "MODIFY"
+	OpDelete = "DELETE"
+	OpMkdir  = "MKDIR"
+	OpRmdir  = "RMDIR"
+	OpMove   = "MOVE"
+)
+
 type FileChange struct {
-	Path string `json:"path"`
-	Diff string `json:"diff"`
+	Path      string `json:"path"`
+	Operation string `json:"operation"`
+	Content   string `json:"content,omitempty"` // Content, diff, or destination path
 }
 
 type Snapshot struct {
@@ -23,10 +33,11 @@ type Snapshot struct {
 }
 
 type ChatSession struct {
-	ID             string       `json:"id"`
-	Messages       []ai.Message `json:"messages"`
-	TotalTokens    int          `json:"total_tokens"`
-	LastSnapshotID string       `json:"last_snapshot_id,omitempty"`
+	ID                string       `json:"id"`
+	Messages          []ai.Message `json:"messages"`
+	TotalInputTokens  int          `json:"total_input_tokens"`
+	TotalOutputTokens int          `json:"total_output_tokens"`
+	LastSnapshotID    string       `json:"last_snapshot_id,omitempty"`
 }
 
 type AgentSession struct {
@@ -39,7 +50,8 @@ type Workspace struct {
 }
 
 func NewWorkspace(root string) *Workspace {
-	return &Workspace{Root: root}
+	absRoot, _ := filepath.Abs(root)
+	return &Workspace{Root: absRoot}
 }
 
 func (w *Workspace) GetTeragenDir() string {
@@ -156,4 +168,30 @@ func (w *Workspace) SaveAgents(agents []AgentSession) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+func (w *Workspace) ListSnapshots(chatID string) ([]*Snapshot, error) {
+	dir := w.GetSnapsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var snaps []*Snapshot
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".json" {
+			data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				continue
+			}
+			var s Snapshot
+			if err := json.Unmarshal(data, &s); err == nil {
+				snaps = append(snaps, &s)
+			}
+		}
+	}
+	return snaps, nil
 }

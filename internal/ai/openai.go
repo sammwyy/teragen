@@ -122,9 +122,10 @@ func (c *OpenAICustomClient) ChatCompletion(ctx context.Context, req CompletionR
 	}
 
 	return CompletionResponse{
-		Content:     aiResp.Choices[0].Message.Content,
-		ToolCalls:   aiResp.Choices[0].Message.ToolCalls,
-		TotalTokens: aiResp.Usage.TotalTokens,
+		Content:      aiResp.Choices[0].Message.Content,
+		ToolCalls:    aiResp.Choices[0].Message.ToolCalls,
+		InputTokens:  aiResp.Usage.PromptTokens,
+		OutputTokens: aiResp.Usage.CompletionTokens,
 	}, nil
 }
 
@@ -224,9 +225,10 @@ func (c *OpenAICustomClient) StreamCompletion(ctx context.Context, req Completio
 					}
 
 					ch <- StreamEvent{
-						Content:   content,
-						ToolCalls: toolCalls,
-						Tokens:    tokens,
+						Content:      content,
+						ToolCalls:    toolCalls,
+						InputTokens:  aiResp.Usage.PromptTokens,
+						OutputTokens: aiResp.Usage.CompletionTokens,
 					}
 				}
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sammwy/teragen/internal/ai"
@@ -23,6 +24,7 @@ type Agent struct {
 	ActiveChatID   string
 	SystemPrompt   string
 	LastSnapshotID string
+	mu             sync.Mutex
 }
 
 func NewAgent(session ...workspace.AgentSession) (*Agent, error) {
@@ -107,15 +109,21 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 	}
 
 	now := time.Now().Format(time.RFC3339)
-	userTokens := estimateTokens(input)
+	a.mu.Lock()
 	a.History = append(a.History, ai.Message{
-		Role:      "user",
-		Content:   input,
-		Tokens:    userTokens,
-		Timestamp: now,
+		Role:        "user",
+		Content:     input,
+		InputTokens: estimateTokens(input),
+		Timestamp:   now,
 	})
+	a.mu.Unlock()
 
 	ch := make(chan ai.StreamEvent)
+
+	// Set evaluator action callback
+	a.Evaluator.OnAction = func(action string) {
+		ch <- ai.StreamEvent{Action: action}
+	}
 	// Loop for tool call turns
 	go func() {
 		defer close(ch)
@@ -162,16 +170,22 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 			}
 
 			fullContent := ""
-			totalTokens := 0
+			turnInputTokens := 0
+			turnOutputTokens := 0
 			var accumulatedToolCalls []ai.ToolCall
 
-			// Add assistant message placeholder
-			assistantMsgIndex := len(a.History)
+			triggerMsgIndex := 0
+			assistantMsgIndex := 0
+
+			a.mu.Lock()
+			triggerMsgIndex = len(a.History) - 1
+			assistantMsgIndex = len(a.History)
 			a.History = append(a.History, ai.Message{
 				Role:      "assistant",
 				Content:   "",
 				Timestamp: time.Now().Format(time.RFC3339),
 			})
+			a.mu.Unlock()
 
 			for ev := range rawCh {
 				if ev.Err != nil {
@@ -180,8 +194,12 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 				}
 
 				fullContent += ev.Content
-				if ev.Tokens > 0 {
-					totalTokens = ev.Tokens
+				if ev.InputTokens > 0 {
+					turnInputTokens = ev.InputTokens
+					a.History[triggerMsgIndex].InputTokens = turnInputTokens
+				}
+				if ev.OutputTokens > 0 {
+					turnOutputTokens = ev.OutputTokens
 				}
 
 				// Accumulate tool calls
@@ -207,9 +225,14 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 				}
 
 				// Update the in-memory history
+				a.mu.Lock()
 				a.History[assistantMsgIndex].Content = fullContent
-				a.History[assistantMsgIndex].Tokens = totalTokens
+				a.History[assistantMsgIndex].OutputTokens = turnOutputTokens
 				a.History[assistantMsgIndex].ToolCalls = accumulatedToolCalls
+				if turnInputTokens > 0 {
+					a.History[triggerMsgIndex].InputTokens = turnInputTokens
+				}
+				a.mu.Unlock()
 
 				ch <- ev
 			}
@@ -221,14 +244,34 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 				}
 
 				// Execute tool calls
-				results, err := a.executeToolCalls(accumulatedToolCalls)
-				if err != nil {
-					ch <- ai.StreamEvent{Err: err}
-					return
-				}
+				for _, call := range accumulatedToolCalls {
+					// Emit starting feedback
+					ch <- ai.StreamEvent{
+						ToolName: call.Function.Name,
+						ToolArgs: call.Function.Arguments,
+					}
 
-				// Add results to history
-				a.History = append(a.History, results...)
+					res, err := a.Evaluator.ToolRegistry.Call(a.ID, call)
+					if err != nil {
+						res = fmt.Sprintf("Error: %v", err)
+					}
+
+					// Emit real-time feedback
+					ch <- ai.StreamEvent{
+						ToolResult: res,
+						ToolName:   call.Function.Name,
+						ToolArgs:   call.Function.Arguments,
+					}
+
+					a.mu.Lock()
+					a.History = append(a.History, ai.Message{
+						Role:       "tool",
+						ToolCallID: call.ID,
+						Content:    res,
+						Timestamp:  time.Now().Format(time.RFC3339),
+					})
+					a.mu.Unlock()
+				}
 				// Continue loop for another LLM turn
 			} else {
 				// No more tools, we're done with this turn
@@ -246,29 +289,43 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 
 			snap, err := a.Evaluator.ActiveSnapshot.Commit(prevSnapID)
 			if err == nil {
-				// Link in chat object
 				a.Evaluator.ActiveSnapshot = nil
-
-				// Update the chat object with the snapshot ID
-				// The snapshot is now linked.
-				// Find any assistant message that called tools and tag it?
-				// Actually, the user said: "guarda el id de la snapsho en el chat objeto. Ademas de eos, guarda el id de la ultima snap en el objeto del chat"
-				// I'll do it at the end.
 				a.LastSnapshotID = snap.ID
+
+				// Link snapshot to the last assistant message
+				a.mu.Lock()
+				for i := len(a.History) - 1; i >= 0; i-- {
+					if a.History[i].Role == "assistant" {
+						a.History[i].SnapshotID = snap.ID
+						break
+					}
+				}
+				a.mu.Unlock()
+
+				// Emit snapshot to UI
+				ch <- ai.StreamEvent{Snapshot: snap}
 			}
 		}
 
 		// Final save to workspace
-		sessionTotal := 0
-		for _, m := range a.History {
-			sessionTotal += m.Tokens
+		inputTotal := 0
+		outputTotal := 0
+		a.mu.Lock()
+		historyToSave := make([]ai.Message, len(a.History))
+		copy(historyToSave, a.History)
+		a.mu.Unlock()
+
+		for _, m := range historyToSave {
+			inputTotal += m.InputTokens
+			outputTotal += m.OutputTokens
 		}
 
 		a.Workspace.SaveChat(&workspace.ChatSession{
-			ID:             a.ActiveChatID,
-			Messages:       a.History,
-			TotalTokens:    sessionTotal,
-			LastSnapshotID: a.LastSnapshotID,
+			ID:                a.ActiveChatID,
+			Messages:          historyToSave,
+			TotalInputTokens:  inputTotal,
+			TotalOutputTokens: outputTotal,
+			LastSnapshotID:    a.LastSnapshotID,
 		})
 
 		// Save agent list
@@ -288,6 +345,7 @@ func (a *Agent) Stream(ctx context.Context, input string) (<-chan ai.StreamEvent
 			})
 		}
 		a.Workspace.SaveAgents(agents)
+		ch <- ai.StreamEvent{Done: true}
 	}()
 
 	return ch, nil

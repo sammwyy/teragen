@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sammwy/teragen/internal/ui/common"
 	"github.com/sammwy/teragen/internal/ui/theme"
+	"github.com/sammwy/teragen/internal/workspace"
 )
 
 func (m *Model) relayout() {
@@ -88,7 +89,14 @@ func (m *Model) renderEntry(e *chatEntry, width int) string {
 		return e.renderedBody
 	}
 
+	if e.role == roleSnapshot {
+		return m.renderSnapshot(e, width)
+	}
+
 	accent, palette := accentInfo(e.role)
+
+	// User and Agent (with content) get the bubble/bar style
+	hasContent := e.body != ""
 
 	barStyle := lipgloss.NewStyle().
 		Border(lipgloss.Border{Left: "▌"}, false, false, false, true).
@@ -112,8 +120,11 @@ func (m *Model) renderEntry(e *chatEntry, width int) string {
 	if e.timestamp != "" {
 		headerTxt += " " + lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorFg)).Render(common.FormatTimestamp(e.timestamp))
 	}
-	if e.tokenCount > 0 {
-		tokensTxt := fmt.Sprintf("(%s tokens)", common.FmtTokens(e.tokenCount))
+	if e.role == roleUser && e.inputTokens > 0 {
+		tokensTxt := fmt.Sprintf("(%s input)", common.FmtTokens(e.inputTokens))
+		headerTxt += " " + tokenHintStyle.Render(tokensTxt)
+	} else if e.role == roleAgent && e.outputTokens > 0 {
+		tokensTxt := fmt.Sprintf("(%s output)", common.FmtTokens(e.outputTokens))
 		headerTxt += " " + tokenHintStyle.Render(tokensTxt)
 	}
 
@@ -123,26 +134,169 @@ func (m *Model) renderEntry(e *chatEntry, width int) string {
 	}
 
 	var bodyRendered string
-	if (e.role == roleAgent || e.role == roleUser) && m.renderer != nil {
+	if (e.role == roleAgent || e.role == roleUser) && m.renderer != nil && hasContent {
 		rendered, err := m.renderer.Render(e.body)
 		if err == nil {
 			bodyRendered = strings.TrimSpace(rendered)
 		}
 	}
 
-	if bodyRendered == "" {
+	if bodyRendered == "" && e.body != "" {
 		wrapped := wordWrap(e.body, innerW)
 		bodyRendered = bodyStyle.Render(wrapped)
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		headerTxt,
-		bodyRendered,
-	)
+	// Real-time operations
+	var opsRendered string
+	if len(e.operations) > 0 {
+		var ops []string
+		prefix := "  " + lipgloss.NewStyle().Foreground(accent).Render("*") + " "
+		if !hasContent && e.role == roleAgent {
+			prefix = lipgloss.NewStyle().Foreground(accent).Bold(true).Render("  » ")
+		}
 
-	e.renderedBody = barStyle.Render(content)
+		for _, op := range e.operations {
+			// Prettify op if possible
+			cleanOp := op
+			if strings.HasPrefix(op, "Tool ") {
+				parts := strings.SplitN(op, ": ", 2)
+				if len(parts) == 2 {
+					name := strings.TrimPrefix(parts[0], "Tool ")
+					res := parts[1]
+					// Generate the "Created/Written/..." text based on tool name
+					verb := "Executed"
+					switch name {
+					case "fs:write":
+						verb = "Written"
+						// Try to extract path from previous call args if available...
+						// But the op string already contains results.
+					case "fs:mkdir":
+						verb = "Created directory"
+					case "fs:unlink":
+						verb = "Deleted"
+					}
+					cleanOp = fmt.Sprintf("%s (%s)", verb, res)
+				}
+			}
+			ops = append(ops, prefix+cleanOp)
+		}
+		opsRendered = strings.Join(ops, "\n")
+	}
+
+	elements := []string{}
+	if hasContent || e.role != roleAgent {
+		elements = append(elements, headerTxt)
+		if bodyRendered != "" {
+			elements = append(elements, bodyRendered)
+		}
+	}
+
+	if opsRendered != "" {
+		elements = append(elements, opsRendered)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, elements...)
+
+	if hasContent || e.role != roleAgent {
+		e.renderedBody = barStyle.Render(content)
+	} else {
+		// No bubble for empty assistant with tools
+		e.renderedBody = content
+	}
+
+	if e.snapshot != nil {
+		e.renderedBody += "\n" + m.renderSnapshot(e, width)
+	}
+
 	e.renderedWidth = width
 	return e.renderedBody
+}
+
+func parseDiffStats(fc workspace.FileChange) (plus, minus int) {
+	if fc.Operation != workspace.OpModify {
+		if fc.Operation == workspace.OpCreate {
+			return len(strings.Split(fc.Content, "\n")), 0
+		}
+		return 0, 0
+	}
+	lines := strings.Split(fc.Content, "\n")
+	for _, l := range lines {
+		if strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "+++") {
+			plus++
+		} else if strings.HasPrefix(l, "-") && !strings.HasPrefix(l, "---") {
+			minus++
+		}
+	}
+	return
+}
+
+func (m *Model) renderSnapshot(e *chatEntry, width int) string {
+	snap := e.snapshot.(*workspace.Snapshot)
+
+	accent := lipgloss.Color(theme.ColorGreen)
+	dimAccent := lipgloss.Color(theme.ColorDim)
+
+	header := lipgloss.NewStyle().
+		Foreground(accent).
+		Bold(true).
+		Render(fmt.Sprintf("Summary (Snapshot %s)", snap.ID[:8]))
+
+	var lines []string
+	lines = append(lines, lipgloss.NewStyle().Foreground(dimAccent).Render("  │"))
+
+	for i, fc := range snap.Files {
+		plus, minus := parseDiffStats(fc)
+		tag := "?"
+		tagColor := lipgloss.Color(theme.ColorDim)
+
+		switch fc.Operation {
+		case workspace.OpCreate:
+			tag = "A"
+			tagColor = lipgloss.Color(theme.ColorGreen)
+		case workspace.OpModify:
+			tag = "M"
+			tagColor = lipgloss.Color(theme.ColorYellow)
+		case workspace.OpDelete:
+			tag = "D"
+			tagColor = lipgloss.Color(theme.ColorRed)
+		case workspace.OpMkdir:
+			tag = "MD"
+			tagColor = lipgloss.Color(theme.ColorCyan)
+		case workspace.OpRmdir:
+			tag = "RD"
+			tagColor = lipgloss.Color(theme.ColorRed)
+		case workspace.OpMove:
+			tag = "MV"
+			tagColor = lipgloss.Color(theme.ColorPurple)
+		}
+
+		conn := "  ├─ "
+		if i == len(snap.Files)-1 {
+			conn = "  ╰─ "
+		}
+
+		tagRendered := lipgloss.NewStyle().Foreground(tagColor).Bold(true).Render(tag)
+		stats := ""
+		if fc.Operation == workspace.OpModify || fc.Operation == workspace.OpCreate {
+			stats = fmt.Sprintf(" (+%d, -%d)", plus, minus)
+		} else if fc.Operation == workspace.OpMove {
+			stats = fmt.Sprintf(" -> %s", fc.Content)
+		}
+
+		prefix := lipgloss.NewStyle().Foreground(dimAccent).Render(conn)
+		lines = append(lines, fmt.Sprintf("%s%s %s%s", prefix, tagRendered, fc.Path, lipgloss.NewStyle().Foreground(lipgloss.Color(theme.ColorDim)).Render(stats)))
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		strings.Join(lines, "\n"),
+	)
+
+	// Connections from bubble to summary
+	bubbleConn := lipgloss.NewStyle().Foreground(dimAccent).Render("  │")
+	headerWithConn := bubbleConn + "\n" + content
+
+	return headerWithConn
 }
 
 func (m *Model) renderSpinnerEntry(width int) string {
@@ -304,8 +458,9 @@ func (m *Model) renderBottomBorder(width int) string {
 
 	hint := statusHintStyle.Render("[Enter] Submit [ESC] Quit")
 	tokenStr := ""
-	if m.sessionTokens > 0 {
-		tokenStr = statusTokenStyle.Render(fmt.Sprintf("%s tokens", common.FmtTokens(m.sessionTokens))) + " " + statusDividerStyle.Render("·") + " "
+	if m.sessionInputTokens > 0 || m.sessionOutputTokens > 0 {
+		usage := fmt.Sprintf("Token usage: %s input | %s output", common.FmtTokens(m.sessionInputTokens), common.FmtTokens(m.sessionOutputTokens))
+		tokenStr = statusTokenStyle.Render(usage) + " " + statusDividerStyle.Render("·") + " "
 	}
 
 	rightTag := " " + tokenStr + hint + " "
