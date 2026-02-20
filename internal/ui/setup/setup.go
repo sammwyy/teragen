@@ -109,17 +109,17 @@ func NewModel() Model {
 	tokenIn.EchoMode = textinput.EchoPassword
 	tokenIn.EchoCharacter = '●'
 	tokenIn.CharLimit = 256
-	tokenIn.Width = 48
+	tokenIn.Width = 32
 
 	modelIn := textinput.New()
 	modelIn.Placeholder = "e.g. gpt-4o  (Tab to browse)"
 	modelIn.CharLimit = 128
-	modelIn.Width = 48
+	modelIn.Width = 32
 
 	urlIn := textinput.New()
 	urlIn.Placeholder = "https://your-server/v1"
 	urlIn.CharLimit = 256
-	urlIn.Width = 48
+	urlIn.Width = 32
 
 	return Model{
 		current:        viewProviderPick,
@@ -416,37 +416,57 @@ func (m Model) View() string {
 func (m Model) viewProviderPick() string {
 	w := m.safeWidth()
 
-	title := centeredBanner(w)
-	subtitle := centerLine("First-run setup wizard", w)
-	step := stepStyle.Render("Step 1 of 1  —  Set up your first provider")
-	sep := dimStyle.Render(strings.Repeat("─", clamp(w-12, 10, 48)))
+	// ── Content ──
+	title := centeredBanner()
+	subtitle := centerLine("First-run setup wizard")
+	step := stepStyle.Render("Step 1 of 2  —  Choose your provider")
+
+	// Calculate natural width for centering and separator
+	contentMaxWidth := lipgloss.Width(step)
+	if contentMaxWidth < 44 {
+		contentMaxWidth = 44
+	}
+	sep := dimStyle.Render(strings.Repeat("─", contentMaxWidth))
 
 	var items strings.Builder
 	for i, p := range AvailableProviders {
+		prefix := "  "
 		if i == m.providerCursor {
-			items.WriteString(selectedItemStyle.Render(cursorStyle.Render("→ ") + p.Name))
+			prefix = cursorStyle.Render("→ ")
+		}
+
+		item := prefix + p.Name
+		if i == m.providerCursor {
+			items.WriteString(selectedItemStyle.Render(item))
 		} else {
-			items.WriteString(itemStyle.Render("  " + p.Name))
+			items.WriteString(itemStyle.Render(item))
 		}
 		items.WriteRune('\n')
 	}
 
+	providerHeader := labelActiveStyle.Width(contentMaxWidth).Align(lipgloss.Center).Render("Available Providers")
+	providerList := lipgloss.JoinVertical(lipgloss.Left,
+		providerHeader,
+		strings.TrimRight(items.String(), "\n"),
+	)
+
 	hint := hintStyle.Render("↑/↓  navigate    enter  select    ctrl+c  quit")
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
+	// ── Assembly ──
+	body := lipgloss.JoinVertical(lipgloss.Center,
 		title,
 		subtitle,
 		"",
 		step,
 		sep,
 		"",
-		labelStyle.Render("Provider"),
-		strings.TrimRight(items.String(), "\n"),
+		providerList,
 		"",
 		hint,
 	)
 
-	box := boxStyle.Width(clamp(w-4, 50, 62)).Render(body)
+	// Wrap in box and place in screen center
+	box := boxStyle.Render(body)
 	return lipgloss.Place(w, m.safeHeight(), lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -455,19 +475,25 @@ func (m Model) viewProviderPick() string {
 func (m Model) viewForm() string {
 	w := m.safeWidth()
 
-	title := centeredBanner(w)
-	subtitle := centerLine("First-run setup wizard", w)
-	step := stepStyle.Render("Step 1 of 1  —  Set up your first provider")
-	sep := dimStyle.Render(strings.Repeat("─", clamp(w-12, 10, 48)))
+	// ── Content ──
+	title := centeredBanner()
+	subtitle := centerLine("First-run setup wizard")
+	step := stepStyle.Render("Step 2 of 2  —  Configure provider")
 
-	var rows strings.Builder
+	// Calculate natural width for centering and separator
+	contentMaxWidth := lipgloss.Width(step)
+	if contentMaxWidth < 44 {
+		contentMaxWidth = 44
+	}
+	sep := dimStyle.Render(strings.Repeat("─", contentMaxWidth))
+
+	var rows []string
 
 	// Provider (read-only)
-	rows.WriteString(lipgloss.JoinHorizontal(lipgloss.Top,
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
 		labelStyle.Render("Provider"),
 		successStyle.Render("✔ "+m.selectedProvider.Name),
 	))
-	rows.WriteRune('\n')
 
 	// Token
 	tokenLabel := labelStyle.Render("API Token")
@@ -478,10 +504,9 @@ func (m Model) viewForm() string {
 	if m.activeField != fieldToken && m.inputs[fieldToken].Value() != "" {
 		tokenVal = successStyle.Render("✔ ") + dimStyle.Render("(set)")
 	}
-	rows.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, tokenLabel, tokenVal))
-	rows.WriteRune('\n')
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, tokenLabel, tokenVal))
 
-	// Model (visible once token is filled or we're already on/past that field)
+	// Model
 	if m.activeField >= fieldModel || m.inputs[fieldToken].Value() != "" {
 		modelLabel := labelStyle.Render("Agent model")
 		if m.activeField == fieldModel {
@@ -491,23 +516,21 @@ func (m Model) viewForm() string {
 		var modelVal string
 		switch {
 		case m.modalLoading:
-			modelVal = dimStyle.Render("⟳ Fetching models…")
+			modelVal = accentStyle.Render("⟳ Fetching models…")
 		case m.activeField != fieldModel && m.inputs[fieldModel].Value() != "":
 			modelVal = successStyle.Render("✔ ") + inputValueStyle.Render(m.inputs[fieldModel].Value())
 		default:
 			modelVal = m.inputs[fieldModel].View()
 		}
 
-		rows.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, modelLabel, modelVal))
-		rows.WriteRune('\n')
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, modelLabel, modelVal))
 
 		if m.activeField == fieldModel && !m.modalLoading {
-			rows.WriteString(tipStyle.Render("  Tip: Press Tab to fetch available models from the API"))
-			rows.WriteRune('\n')
+			rows = append(rows, tipStyle.Render("  Tip: Press Tab to browse available models"))
 		}
 	}
 
-	// Base URL (custom only, shown once model field is reached)
+	// Base URL (custom only)
 	if m.selectedProvider.Type == "openai-custom" &&
 		(m.activeField >= fieldBaseURL || m.inputs[fieldModel].Value() != "") {
 		urlLabel := labelStyle.Render("Base URL")
@@ -518,36 +541,38 @@ func (m Model) viewForm() string {
 		if m.activeField != fieldBaseURL && m.inputs[fieldBaseURL].Value() != "" {
 			urlVal = successStyle.Render("✔ ") + inputValueStyle.Render(m.inputs[fieldBaseURL].Value())
 		}
-		rows.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, urlLabel, urlVal))
-		rows.WriteRune('\n')
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, urlLabel, urlVal))
 	}
 
 	// Error
 	if m.err != "" {
-		rows.WriteString(errorStyle.Render("✖ " + m.err))
-		rows.WriteRune('\n')
+		rows = append(rows, "", errorStyle.Render("✖ "+m.err))
 	}
 
 	var hintLine string
 	if m.modalLoading {
-		hintLine = hintStyle.Render("Fetching models from the API…  ctrl+c  quit")
+		hintLine = "Fetching models from the API…  ctrl+c  quit"
 	} else {
-		hintLine = hintStyle.Render("enter/tab  next    shift+tab  back    esc  change provider    ctrl+c  quit")
+		hintLine = "enter/tab  next    shift+tab  back    esc  change provider    ctrl+c  quit"
 	}
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
+	formBody := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	hint := hintStyle.Render(hintLine)
+
+	// ── Assembly ──
+	body := lipgloss.JoinVertical(lipgloss.Center,
 		title,
 		subtitle,
 		"",
 		step,
 		sep,
 		"",
-		strings.TrimRight(rows.String(), "\n"),
+		formBody,
 		"",
-		hintLine,
+		hint,
 	)
 
-	box := boxStyle.Width(clamp(w-4, 50, 62)).Render(body)
+	box := boxStyle.Render(body)
 	bg := lipgloss.Place(w, m.safeHeight(), lipgloss.Center, lipgloss.Center, box)
 
 	if m.showModelModal {
@@ -561,8 +586,13 @@ func (m Model) viewForm() string {
 // ── Model picker modal ────────────────────────────────────────────────────────
 
 func (m Model) renderModal() string {
-	title := modalTitleStyle.Render("Select a model")
-	sep := dimStyle.Render(strings.Repeat("─", 42))
+	maxWidth := m.safeWidth()
+	w := clamp(maxWidth-10, 30, 50)
+	title := modalTitleStyle.Width(w).Render("✦ SELECT MODEL ✦")
+	instruction := modalInstructionStyle.Width(w).Render("Choose a model for your provider")
+	sepLen := clamp(w-4, 5, 46)
+	sepLine := dimStyle.Render(strings.Repeat("─", sepLen))
+	sep := lipgloss.PlaceHorizontal(w, lipgloss.Center, sepLine)
 
 	// Fetch error banner
 	var errBanner string
@@ -571,8 +601,11 @@ func (m Model) renderModal() string {
 		if len(short) > 60 {
 			short = short[:60] + "…"
 		}
-		errBanner = errorStyle.Render("⚠ API error: "+short) + "\n" +
-			dimStyle.Render("  Showing built-in model list instead") + "\n"
+		errBanner = lipgloss.JoinVertical(lipgloss.Center,
+			errorStyle.Width(w).Align(lipgloss.Center).Render("⚠ API error: "+short),
+			dimStyle.Width(w).Align(lipgloss.Center).Render("Showing built-in model list instead"),
+			"",
+		)
 	}
 
 	var list strings.Builder
@@ -581,63 +614,87 @@ func (m Model) renderModal() string {
 	if hi > len(m.modalList) {
 		hi = len(m.modalList)
 	}
+
+	// Add up arrow if scrolled down
+	if lo > 0 {
+		list.WriteString(dimStyle.Render("       ▲ more items above") + "\n")
+	} else {
+		list.WriteString("\n")
+	}
+
 	for i := lo; i < hi; i++ {
+		prefix := "  "
 		if i == m.modalCursor {
-			list.WriteString(selectedItemStyle.Render(cursorStyle.Render("→ ") + m.modalList[i]))
+			prefix = cursorStyle.Render("→ ")
+		}
+
+		item := prefix + m.modalList[i]
+		if i == m.modalCursor {
+			list.WriteString(selectedItemStyle.Render(item))
 		} else {
-			list.WriteString(itemStyle.Render("  " + m.modalList[i]))
+			list.WriteString(itemStyle.Render(item))
 		}
 		list.WriteRune('\n')
 	}
 
+	// Add down arrow if more items below
+	if hi < len(m.modalList) {
+		list.WriteString(dimStyle.Render("       ▼ more items below") + "\n")
+	} else {
+		list.WriteString("\n")
+	}
+
 	var scrollHint string
 	if len(m.modalList) > m.modalPageSize {
-		scrollHint = dimStyle.Render(fmt.Sprintf("  %d / %d  ↑/↓ scroll", m.modalCursor+1, len(m.modalList)))
+		scrollHint = lipgloss.PlaceHorizontal(w, lipgloss.Center,
+			dimStyle.Render(fmt.Sprintf("%d / %d", m.modalCursor+1, len(m.modalList))),
+		)
 	}
 
-	hint := hintStyle.Render("enter  select    r  refresh    esc  close")
+	hint := lipgloss.PlaceHorizontal(w, lipgloss.Center,
+		hintStyle.Render("enter  select    r  refresh    esc  close"),
+	)
 
-	parts := []string{title, sep}
-	if errBanner != "" {
-		parts = append(parts, errBanner)
-	}
-	parts = append(parts,
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		instruction,
+		sep,
+		"",
+		errBanner,
 		strings.TrimRight(list.String(), "\n"),
+		"",
 		scrollHint,
 		hint,
 	)
 
-	modalContent := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	return modalStyle.Width(50).Render(modalContent)
+	return modalStyle.Width(w).Render(content)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (m Model) safeWidth() int {
-	if m.width < 20 {
-		return 80
+	if m.width > 0 {
+		return m.width
 	}
-	return m.width
+	return 80
 }
 
 func (m Model) safeHeight() int {
-	if m.height < 10 {
-		return 24
+	if m.height > 0 {
+		return m.height
 	}
-	return m.height
+	return 24
 }
 
-func centeredBanner(width int) string {
-	s := lipgloss.NewStyle().
+func centeredBanner() string {
+	return lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color(colorCyan)).
 		Render("✦  T E R A G E N  ✦")
-	return lipgloss.PlaceHorizontal(width, lipgloss.Center, s)
 }
 
-func centerLine(s string, width int) string {
-	return lipgloss.PlaceHorizontal(width, lipgloss.Center,
-		subtitleStyle.Render(s))
+func centerLine(s string) string {
+	return subtitleStyle.Render(s)
 }
 
 func clamp(v, lo, hi int) int {

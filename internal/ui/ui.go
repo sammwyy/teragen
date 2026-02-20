@@ -16,22 +16,23 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sammwy/teragen/internal/ai"
 	"github.com/sammwy/teragen/internal/core"
+	"github.com/sammwy/teragen/internal/ui/theme"
 )
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 
 const (
-	colCyan   = "#8BE9FD" // Pastel Cyan
-	colRose   = "#FF79C6" // Pastel Pink
-	colPurple = "#BD93F9" // Pastel Purple
-	colGreen  = "#50FA7B" // Pastel Green
-	colOrange = "#FFB86C" // Pastel Orange
-	colRed    = "#FF5555" // Pastel Red
-	colDim    = "#6272A4" // Muted Blue/Gray
-	colFg     = "#F8F8F2" // White
-	colSubtle = "#6272A4" // Subtle
-	colYellow = "#F1FA8C" // Pastel Yellow
-	colBlack  = "#282A36" // Dracula Background (as a light black)
+	colCyan   = theme.ColorCyan
+	colRose   = theme.ColorRose
+	colPurple = theme.ColorPurple
+	colGreen  = theme.ColorGreen
+	colOrange = theme.ColorAccent
+	colRed    = theme.ColorRed
+	colDim    = theme.ColorDim
+	colFg     = theme.ColorFg
+	colSubtle = theme.ColorDim
+	colYellow = theme.ColorYellow
+	colBlack  = theme.ColorBlack
 )
 
 // ── Styles ───────────────────────────────────────────────────────────────────
@@ -153,6 +154,10 @@ type chatEntry struct {
 	body       string
 	tokenCount int
 	timestamp  string
+
+	// Cache for rendered output
+	renderedBody  string
+	renderedWidth int
 }
 
 // ── Tea messages ─────────────────────────────────────────────────────────────
@@ -166,8 +171,6 @@ type processResultMsg struct {
 	stream   bool
 	done     bool
 }
-
-// ── Model ─────────────────────────────────────────────────────────────────────
 
 type model struct {
 	core          *core.Core
@@ -185,6 +188,9 @@ type model struct {
 	historyIndex int
 
 	eventCh chan core.Event
+
+	// Markdown renderer
+	renderer *glamour.TermRenderer
 }
 
 func NewUI(c *core.Core, activeAgentID string) *model {
@@ -196,6 +202,12 @@ func NewUI(c *core.Core, activeAgentID string) *model {
 	ti.Prompt = "  ❯ "
 
 	vp := viewport.New(80, 20)
+
+	// Create renderer with a fixed dark style (Dracula-like) to avoid terminal round-trips
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(80),
+	)
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -209,7 +221,13 @@ func NewUI(c *core.Core, activeAgentID string) *model {
 		spinner:       sp,
 		entries:       []chatEntry{},
 		eventCh:       make(chan core.Event, 100),
+		width:         80,
+		height:        24,
+		renderer:      r,
 	}
+
+	// Hydro-hydrate...
+	m.relayout()
 
 	// Hydrate history from agent if available
 	if activeAgentID != "" {
@@ -248,7 +266,7 @@ func waitForEvent(ch chan core.Event) tea.Cmd {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 
-func (m model) Init() tea.Cmd {
+func (m *model) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,
 		m.spinner.Tick,
@@ -258,7 +276,7 @@ func (m model) Init() tea.Cmd {
 
 // ── Update ───────────────────────────────────────────────────────────────────
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -302,26 +320,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case core.EventChatSwitched:
 			newID := msg.Data.(string)
 			m.activeAgentID = newID
-			m.entries = []chatEntry{}
-			m.sessionTokens = 0
-			if a, ok := m.core.Agents[m.activeAgentID]; ok {
-				for _, hm := range a.History {
-					m.sessionTokens += hm.Tokens
-					r := roleAgent
-					label := "Agent"
-					if hm.Role == "user" {
-						r = roleUser
-						label = "You"
-					}
-					m.entries = append(m.entries, chatEntry{
-						role:       r,
-						label:      label,
-						body:       hm.Content,
-						tokenCount: hm.Tokens,
-						timestamp:  hm.Timestamp,
-					})
-				}
-			}
+			m.hydrateHistory()
 			m.processing = false
 
 		case core.EventStreamChunk:
@@ -330,6 +329,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent && m.processing {
 				m.entries[lastIdx].body += ev.Content
 				m.entries[lastIdx].tokenCount = ev.Tokens
+				// Invalidate cache
+				m.entries[lastIdx].renderedWidth = 0
 			} else {
 				m.entries = append(m.entries, chatEntry{
 					role:       roleAgent,
@@ -355,6 +356,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			lastIdx := len(m.entries) - 1
 			if lastIdx >= 0 && m.entries[lastIdx].role == roleAgent {
 				m.entries[lastIdx].tokenCount = ev.Tokens
+				m.entries[lastIdx].renderedWidth = 0
 			}
 		}
 
@@ -582,6 +584,27 @@ func (m *model) relayout() {
 	m.viewport.Width = vpWidth - 2 // space for vertical borders
 	m.viewport.Height = vpHeight
 	m.textInput.Width = clamp(vpWidth-10, 20, vpWidth-10)
+
+	// Update renderer word wrap
+	if m.renderer != nil {
+		innerW := m.viewport.Width - 4
+		if innerW < 20 {
+			innerW = 20
+		}
+		// Glamour doesn't have an easy "SetWidth" so we recreate it if needed,
+		// but standard dark style is already fast and doesn't query terminal.
+		r, _ := glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(innerW),
+		)
+		m.renderer = r
+	}
+
+	// Invalidate all caches on resize
+	for i := range m.entries {
+		m.entries[i].renderedWidth = 0
+	}
+
 	m.refreshViewport()
 }
 
@@ -598,12 +621,12 @@ func (m *model) refreshViewport() {
 
 func (m *model) renderEntries(width int) string {
 	var sb strings.Builder
-	for i, e := range m.entries {
+	for i := range m.entries {
 		if i > 0 {
 			// Extra blank line between messages for breathing room
 			sb.WriteString("\n\n")
 		}
-		sb.WriteString(renderEntry(e, width))
+		sb.WriteString(m.renderEntry(&m.entries[i], width))
 	}
 	if m.processing {
 		sb.WriteString("\n\n")
@@ -628,13 +651,21 @@ func accentInfo(r role) (lipgloss.Color, string) {
 	}
 }
 
-func renderEntry(e chatEntry, width int) string {
+func (m *model) renderEntry(e *chatEntry, width int) string {
+	// Use cache if available
+	if e.renderedWidth == width && e.renderedBody != "" {
+		return e.renderedBody
+	}
+
 	accent, _ := accentInfo(e.role)
 
 	// ── Left border bar ────────────────────────────────────────────────────
-	bar := lipgloss.NewStyle().Foreground(accent).Render("▌ ")
+	barStyle := lipgloss.NewStyle().
+		Border(lipgloss.Border{Left: "▌"}, false, false, false, true).
+		BorderLeftForeground(accent).
+		PaddingLeft(1)
 
-	// ── Header (Badge + Time + Tokens) ──────────────────────────────────────
+	// ── Badge (Role Label) ────────────────────────────────────────────────
 	badgeStyle := lipgloss.NewStyle().
 		Background(accent).
 		Foreground(lipgloss.Color(colBlack)).
@@ -660,16 +691,10 @@ func renderEntry(e chatEntry, width int) string {
 
 	// ── Body (Markdown) ───────────────────────────────────────────────────
 	var bodyRendered string
-	if e.role == roleAgent || e.role == roleUser {
-		renderer, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(innerW),
-		)
+	if (e.role == roleAgent || e.role == roleUser) && m.renderer != nil {
+		rendered, err := m.renderer.Render(e.body)
 		if err == nil {
-			rendered, err := renderer.Render(e.body)
-			if err == nil {
-				bodyRendered = strings.TrimSpace(rendered)
-			}
+			bodyRendered = strings.TrimSpace(rendered)
 		}
 	}
 
@@ -678,34 +703,28 @@ func renderEntry(e chatEntry, width int) string {
 		bodyRendered = bodyStyle.Render(wrapped)
 	}
 
-	// ── Assemble lines, each prefixed with the bar ──────────────────────────
-	var inner strings.Builder
-	inner.WriteString(headerTxt)
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		headerTxt,
+		"",
+		bodyRendered,
+	)
 
-	bodyLines := strings.Split(bodyRendered, "\n")
-	for _, l := range bodyLines {
-		inner.WriteRune('\n')
-		inner.WriteString(l)
-	}
-
-	allLines := strings.Split(inner.String(), "\n")
-	var out strings.Builder
-	for i, l := range allLines {
-		out.WriteString(bar)
-		out.WriteString(l)
-		if i < len(allLines)-1 {
-			out.WriteRune('\n')
-		}
-	}
-
-	return out.String()
+	e.renderedBody = barStyle.Render(content)
+	e.renderedWidth = width
+	return e.renderedBody
 }
 
 func (m *model) renderSpinnerEntry(width int) string {
-	bar := lipgloss.NewStyle().Foreground(accentAgent).Render("▌ ")
+	accent := accentAgent
+
+	// ── Left border bar ────────────────────────────────────────────────────
+	barStyle := lipgloss.NewStyle().
+		Border(lipgloss.Border{Left: "▌"}, false, false, false, true).
+		BorderLeftForeground(accent).
+		PaddingLeft(1)
 
 	badge := lipgloss.NewStyle().
-		Background(accentAgent).
+		Background(accent).
 		Foreground(lipgloss.Color(colBlack)).
 		Bold(true).
 		Padding(0, 1).
@@ -713,25 +732,26 @@ func (m *model) renderSpinnerEntry(width int) string {
 
 	thinking := spinnerTextStyle.Render(m.spinner.View() + "  thinking…")
 
-	return bar + badge + "\n" + bar + thinking
+	content := lipgloss.JoinVertical(lipgloss.Left,
+		badge,
+		thinking,
+	)
+
+	return barStyle.Render(content)
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
-func (m model) View() string {
-	if m.width == 0 {
-		return "Loading…"
-	}
-
+func (m *model) View() string {
 	w := m.width
 	if w < 10 {
 		w = 80
 	}
 
 	// ── Header (Top Border) ───────────────────────────────────────────────────
-	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
+	topLineStyle := lipgloss.NewStyle().Foreground(theme.Purple)
 
-	logo := borderStyle.Render("─") + " " + headerLogoStyle.Render("✦ TERAGEN") + " " + borderStyle.Render("─")
+	logo := topLineStyle.Render("─") + " " + headerLogoStyle.Render("✦ TERAGEN") + " " + topLineStyle.Render("─")
 
 	// Agent Tabs
 	var tabs []string
@@ -749,7 +769,7 @@ func (m model) View() string {
 	} else {
 		tabs = append(tabs, tabInactiveStyle.Render("+"))
 	}
-	tabsStr := borderStyle.Render("─") + " " + strings.Join(tabs, " ") + " " + borderStyle.Render("─")
+	tabsStr := topLineStyle.Render("─") + " " + strings.Join(tabs, " ") + " " + topLineStyle.Render("─")
 
 	logoLen := lipgloss.Width(logo)
 	tabsLen := lipgloss.Width(tabsStr)
@@ -762,7 +782,7 @@ func (m model) View() string {
 		availablePathWidth = 10
 	}
 	renderedPath := m.renderPath(cwd, availablePathWidth)
-	cwdTag := borderStyle.Render("┤") + " " + renderedPath + " " + borderStyle.Render("├")
+	cwdTag := topLineStyle.Render("┤") + " " + renderedPath + " " + topLineStyle.Render("├")
 	cwdLen := lipgloss.Width(cwdTag)
 
 	middleEmpty := w - logoLen - cwdLen - tabsLen - 2
@@ -770,16 +790,21 @@ func (m model) View() string {
 		middleEmpty = 0
 	}
 
-	topLine := borderStyle.Render("╭") +
-		logo + cwdTag + borderStyle.Render(strings.Repeat("─", middleEmpty)) +
-		tabsStr + borderStyle.Render("╮")
+	topLine := topLineStyle.Render("╭") +
+		logo + cwdTag + topLineStyle.Render(strings.Repeat("─", middleEmpty)) +
+		tabsStr + topLineStyle.Render("╮")
 
-	// ── Chat Content ──────────────────────────────────────────────────────────
+	// ── Chat Content with Gradient Side Borders ───────────────────────────────
 	chatLines := strings.Split(m.viewport.View(), "\n")
 	var chatWithBorders strings.Builder
-	verticalBorder := borderStyle.Render("│")
+	vh := m.viewport.Height
 
-	for i := 0; i < m.viewport.Height; i++ {
+	for i := 0; i < vh; i++ {
+		// Calculate gradient color for this line
+		percent := float64(i) / float64(vh-1)
+		lineColor := theme.GetGradientColor(percent)
+		verticalBorder := lipgloss.NewStyle().Foreground(lineColor).Render("│")
+
 		content := ""
 		if i < len(chatLines) {
 			content = chatLines[i]
@@ -795,7 +820,7 @@ func (m model) View() string {
 		chatWithBorders.WriteString(content)
 		chatWithBorders.WriteString(strings.Repeat(" ", padding))
 		chatWithBorders.WriteString(verticalBorder)
-		if i < m.viewport.Height-1 {
+		if i < vh-1 {
 			chatWithBorders.WriteRune('\n')
 		}
 	}
@@ -812,7 +837,8 @@ func (m model) View() string {
 	if inputPadding < 0 {
 		inputPadding = 0
 	}
-	inputLine := verticalBorder + " " + inputContent + strings.Repeat(" ", inputPadding-1) + verticalBorder
+	inputVerticalBorder := lipgloss.NewStyle().Foreground(theme.Rose).Render("│")
+	inputLine := inputVerticalBorder + " " + inputContent + strings.Repeat(" ", inputPadding-1) + inputVerticalBorder
 
 	// ── Bottom Border (Status) ────────────────────────────────────────────────
 	bottomLine := m.renderBottomBorder(w)
@@ -826,7 +852,7 @@ func (m model) View() string {
 }
 
 func (m model) renderBottomBorder(width int) string {
-	borderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(colDim))
+	bottomBorderStyle := lipgloss.NewStyle().Foreground(theme.Rose)
 
 	// Left: Chat ID | Provider > Model
 	var leftTag string
@@ -848,13 +874,14 @@ func (m model) renderBottomBorder(width int) string {
 		leftTag = " #? │ No Agent "
 	}
 
-	// Right: Tokens | [Enter] ...
+	hint := statusHintStyle.Render("[Enter] Submit [ESC] Quit")
+
 	tokenStr := ""
 	if m.sessionTokens > 0 {
 		tokenStr = statusTokenStyle.Render(fmt.Sprintf("%s tokens", fmtTokens(m.sessionTokens))) + " " + statusDividerStyle.Render("·") + " "
 	}
-	hints := statusHintStyle.Render("[Enter] Submit [ESC] Quit")
-	rightTag := " " + tokenStr + hints + " "
+
+	rightTag := " " + tokenStr + hint + " "
 
 	leftLen := lipgloss.Width(leftTag)
 	rightLen := lipgloss.Width(rightTag)
@@ -864,15 +891,15 @@ func (m model) renderBottomBorder(width int) string {
 		middleLen = 0
 	}
 
-	return borderStyle.Render("╰") + leftTag +
-		borderStyle.Render(strings.Repeat("─", middleLen)) +
-		rightTag + borderStyle.Render("╯")
+	return bottomBorderStyle.Render("╰") + leftTag +
+		bottomBorderStyle.Render(strings.Repeat("─", middleLen)) +
+		rightTag + bottomBorderStyle.Render("╯")
 }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 
 func (m *model) Run() error {
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }

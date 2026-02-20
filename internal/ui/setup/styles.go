@@ -1,27 +1,27 @@
 package setup
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+	"github.com/sammwy/teragen/internal/ui/theme"
+)
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 const (
-	colorCyan     = "#00F5FF"
-	colorRose     = "#FF6EC7"
-	colorPurple   = "#BD93F9"
-	colorMagenta  = "#FF79C6"
-	colorDim      = "#6272A4"
-	colorFg       = "#F8F8F2"
-	colorBg       = "#0D0D1A"
-	colorSelected = "#00F5FF"
-	colorBorder   = "#44475A"
+	colorCyan     = theme.ColorCyan
+	colorRose     = theme.ColorRose
+	colorPurple   = theme.ColorPurple
+	colorMagenta  = theme.ColorMagenta
+	colorDim      = theme.ColorDim
+	colorFg       = theme.ColorFg
+	colorBg       = theme.ColorBg
+	colorSelected = theme.ColorCyan
+	colorAccent   = theme.ColorAccent
 )
 
 // ── Base styles ───────────────────────────────────────────────────────────────
 var (
 	// Outer box
-	boxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(colorBorder)).
-			Padding(1, 3)
+	boxStyle = theme.BoxStyle.Copy().Padding(1, 4)
 
 	// Title  ── big centred header
 	titleStyle = lipgloss.NewStyle().
@@ -38,18 +38,19 @@ var (
 	// Step label
 	stepStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorMagenta)).
-			Bold(true)
+			Bold(true).
+			MarginBottom(1)
 
 	// Normal label inside a form row
 	labelStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorDim)).
-			Width(16)
+			Width(20)
 
 	// Selected / active label
 	labelActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color(colorCyan)).
 				Bold(true).
-				Width(16)
+				Width(20)
 
 	// Normal list item
 	itemStyle = lipgloss.NewStyle().
@@ -73,29 +74,34 @@ var (
 
 	// Error text
 	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF5555"))
+			Foreground(lipgloss.Color(theme.ColorRed))
 
 	// Success text
 	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#50FA7B"))
+			Foreground(lipgloss.Color(theme.ColorGreen))
 
 	// Tip text
 	tipStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorDim)).
-			Italic(true)
+			Italic(true).
+			MarginTop(1)
 
 	// Modal box
-	modalStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(colorRose)).
-			Padding(1, 2).
-			Background(lipgloss.Color(colorBg))
+	modalStyle = theme.BoxStyle.Copy().Padding(1, 2).Background(lipgloss.Color(colorBg))
 
 	// Modal title
 	modalTitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color(colorRose)).
+			Align(lipgloss.Center).
 			MarginBottom(1)
+
+	// Modal instructions
+	modalInstructionStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorDim)).
+				Italic(true).
+				Align(lipgloss.Center).
+				MarginBottom(1)
 
 	// Filled input value
 	inputValueStyle = lipgloss.NewStyle().
@@ -105,4 +111,8 @@ var (
 	hintStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorDim)).
 			MarginTop(1)
+
+	// Accent style
+	accentStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color(colorAccent))
 )
