@@ -90,7 +90,7 @@ func (c *Core) CreateAgent() (string, *agent.Agent, error) {
 	newID := fmt.Sprintf("%d", max+1)
 	c.mu.Unlock()
 
-	ag, err := agent.NewAgentForSession(workspace.AgentSession{
+	ag, err := agent.NewAgent(workspace.AgentSession{
 		ID: newID,
 	})
 	if err != nil {

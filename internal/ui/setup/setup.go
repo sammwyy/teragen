@@ -21,6 +21,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sammwy/teragen/internal/ai"
 	"github.com/sammwy/teragen/internal/config"
+	"github.com/sammwy/teragen/internal/ui/common"
+	"github.com/sammwy/teragen/internal/ui/theme"
 )
 
 // ── View IDs ─────────────────────────────────────────────────────────────────
@@ -587,10 +589,10 @@ func (m Model) viewForm() string {
 
 func (m Model) renderModal() string {
 	maxWidth := m.safeWidth()
-	w := clamp(maxWidth-10, 30, 50)
+	w := common.Clamp(maxWidth-10, 30, 50)
 	title := modalTitleStyle.Width(w).Render("✦ SELECT MODEL ✦")
 	instruction := modalInstructionStyle.Width(w).Render("Choose a model for your provider")
-	sepLen := clamp(w-4, 5, 46)
+	sepLen := common.Clamp(w-4, 5, 46)
 	sepLine := dimStyle.Render(strings.Repeat("─", sepLen))
 	sep := lipgloss.PlaceHorizontal(w, lipgloss.Center, sepLine)
 
@@ -689,22 +691,12 @@ func (m Model) safeHeight() int {
 func centeredBanner() string {
 	return lipgloss.NewStyle().
 		Bold(true).
-		Foreground(lipgloss.Color(colorCyan)).
+		Foreground(lipgloss.Color(theme.ColorCyan)).
 		Render("✦  T E R A G E N  ✦")
 }
 
 func centerLine(s string) string {
 	return subtitleStyle.Render(s)
-}
-
-func clamp(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

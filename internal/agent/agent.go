@@ -24,7 +24,7 @@ type Agent struct {
 	SystemPrompt   string
 }
 
-func NewAgentForSession(session workspace.AgentSession) (*Agent, error) {
+func NewAgent(session ...workspace.AgentSession) (*Agent, error) {
 	appCfg, err := config.LoadAppConfig()
 	if err != nil {
 		return nil, err
@@ -35,9 +35,24 @@ func NewAgentForSession(session workspace.AgentSession) (*Agent, error) {
 		return nil, err
 	}
 
+	var activeSession workspace.AgentSession
+	if len(session) > 0 && session[0].ID != "" {
+		activeSession = session[0]
+	} else {
+		agents, err := ws.LoadAgents()
+		if err != nil {
+			return nil, err
+		}
+		if len(agents) > 0 {
+			activeSession = agents[0]
+		} else {
+			activeSession = workspace.AgentSession{ID: "1", ActiveChatID: "1"}
+		}
+	}
+
 	history := []ai.Message{}
-	if session.ActiveChatID != "" {
-		chat, _ := ws.LoadChat(session.ActiveChatID)
+	if activeSession.ActiveChatID != "" {
+		chat, _ := ws.LoadChat(activeSession.ActiveChatID)
 		if chat != nil {
 			history = chat.Messages
 		}
@@ -50,67 +65,8 @@ func NewAgentForSession(session workspace.AgentSession) (*Agent, error) {
 		Evaluator:    evaluator.NewEvaluator(),
 		History:      history,
 		Workspace:    ws,
-		ID:           session.ID,
-		ActiveChatID: session.ActiveChatID,
-		SystemPrompt: sp,
-	}
-
-	if appCfg.ActiveProviderID != "" {
-		providers, _ := config.LoadProviders()
-		for _, p := range providers {
-			if p.ID == appCfg.ActiveProviderID {
-				agent.SetActiveProvider(p)
-				break
-			}
-		}
-	}
-
-	return agent, nil
-}
-
-func NewAgent() (*Agent, error) {
-	appCfg, err := config.LoadAppConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	ws := workspace.NewWorkspace(".")
-	if err := ws.EnsureDirectories(); err != nil {
-		return nil, err
-	}
-
-	agents, err := ws.LoadAgents()
-	if err != nil {
-		return nil, err
-	}
-
-	var activeChatID string
-	if len(agents) > 0 {
-		activeChatID = agents[0].ActiveChatID
-	}
-
-	history := []ai.Message{}
-	if activeChatID != "" {
-		chat, _ := ws.LoadChat(activeChatID)
-		if chat != nil {
-			history = chat.Messages
-		}
-	}
-
-	sp, _ := config.LoadSystemPrompt(appCfg)
-
-	var id string
-	if len(agents) > 0 {
-		id = agents[0].ID
-	}
-
-	agent := &Agent{
-		Config:       appCfg,
-		Evaluator:    evaluator.NewEvaluator(),
-		History:      history,
-		Workspace:    ws,
-		ID:           id,
-		ActiveChatID: activeChatID,
+		ID:           activeSession.ID,
+		ActiveChatID: activeSession.ActiveChatID,
 		SystemPrompt: sp,
 	}
 

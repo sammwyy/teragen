@@ -8,7 +8,7 @@ import (
 	"github.com/sammwy/teragen/internal/config"
 	"github.com/sammwy/teragen/internal/core"
 	"github.com/sammwy/teragen/internal/processor"
-	"github.com/sammwy/teragen/internal/ui"
+	"github.com/sammwy/teragen/internal/ui/chat"
 	"github.com/sammwy/teragen/internal/ui/setup"
 	"github.com/sammwy/teragen/internal/workspace"
 )
@@ -46,7 +46,7 @@ func main() {
 
 	cr := core.NewCore(nil) // We'll set the processor properly
 	for _, s := range sessions {
-		ag, err := agent.NewAgentForSession(s)
+		ag, err := agent.NewAgent(s)
 		if err != nil {
 			continue
 		}
@@ -69,7 +69,7 @@ func main() {
 	proc := processor.NewProcessor(nil)
 	cr.Processor = proc
 
-	tui := ui.NewUI(cr, activeAgentID)
+	tui := chat.NewUI(cr, activeAgentID)
 
 	if err := tui.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running UI: %v\n", err)

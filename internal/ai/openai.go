@@ -194,9 +194,15 @@ func (c *OpenAICustomClient) StreamCompletion(ctx context.Context, req Completio
 					if len(aiResp.Choices) > 0 {
 						content = aiResp.Choices[0].Delta.Content
 					}
+
+					tokens := aiResp.Usage.TotalTokens
+					if tokens == 0 {
+						tokens = aiResp.Usage.CompletionTokens
+					}
+
 					ch <- StreamEvent{
 						Content: content,
-						Tokens:  aiResp.Usage.CompletionTokens, // Current best guess for assistant tokens
+						Tokens:  tokens,
 					}
 				}
 			}
