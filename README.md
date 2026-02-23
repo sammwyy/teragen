@@ -31,11 +31,39 @@ go build -o teragen ./cmd/teragen
 ```
 
 ### Running
+
 Start the interface directly from your project root:
 
 ```bash
 ./teragen
 ```
+
+You can also specify the workspace directory explicitly and choose how Teragen
+persists its own metadata and filesystem operations:
+
+```bash
+# Use current directory as workspace (default)
+./teragen
+
+# Use a specific project directory as workspace
+./teragen ./myproject
+
+# Ephemeral metadata: .teragen state (chats, snapshots, agents) lives only in memory
+# but filesystem tools still operate on the real project files.
+./teragen -e
+./teragen ./myproject -e
+
+# Mock filesystem: all LLM fs:* tools read/write an in‑memory virtual FS only.
+# No real files are touched.
+./teragen -m
+./teragen ./myproject -m
+```
+
+- **Cwd**: default mode, `.teragen` + filesystem on disk in the chosen workspace.
+- **Ephemeral** (`-e` / `--ephemeral`): `.teragen` is in-memory only for the session;
+  the agent still edits real files on disk.
+- **Mock** (`-m` / `--mock`): both `.teragen` and filesystem operations are fully
+  virtual and kept in memory only.
 
 ## 🛠 Shortcuts & Navigation
 

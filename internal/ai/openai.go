@@ -37,6 +37,20 @@ func NewOpenRouterClient(cfg config.ProviderConfig, token string) *OpenAICustomC
 	return NewOpenAICustomClient(cfg, token, "https://openrouter.ai/api/v1")
 }
 
+// applyDefaultHeaders applies common headers for all OpenAI-compatible
+// providers and, when using OpenRouter, the recommended telemetry headers
+// so the project is attributed correctly on openrouter.ai.
+func (c *OpenAICustomClient) applyDefaultHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
+
+	// OpenRouter-specific headers for rankings/attribution.
+	if c.Config.Type == "openrouter" {
+		req.Header.Set("HTTP-Referer", "https://github.com/sammwy/teragen")
+		req.Header.Set("X-Title", "Teragen")
+	}
+}
+
 type openAIResponse struct {
 	Choices []struct {
 		Message struct {
@@ -89,8 +103,7 @@ func (c *OpenAICustomClient) ChatCompletion(ctx context.Context, req CompletionR
 		return CompletionResponse{}, err
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
+	c.applyDefaultHeaders(httpReq)
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
@@ -143,8 +156,7 @@ func (c *OpenAICustomClient) StreamCompletion(ctx context.Context, req Completio
 		return nil, err
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
+	c.applyDefaultHeaders(httpReq)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := http.DefaultClient.Do(httpReq)
@@ -251,8 +263,7 @@ func (c *OpenAICustomClient) ListModels(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
-	httpReq.Header.Set("Content-Type", "application/json")
+	c.applyDefaultHeaders(httpReq)
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
