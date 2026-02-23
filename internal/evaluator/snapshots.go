@@ -1,14 +1,14 @@
 package evaluator
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pmezard/go-difflib/difflib"
 	"github.com/sammwy/teragen/internal/workspace"
 )
 
@@ -16,9 +16,14 @@ type SnapshotSession struct {
 	ID        string
 	ChatID    string
 	StartTime time.Time
-	Originals map[string]string               // Path -> TempPath
+	Originals map[string]originalFile         // AbsPath -> original
 	Changes   map[string]workspace.FileChange // Path -> Operation Info
-	Workspace *workspace.Workspace
+	Workspace workspace.Workspace
+}
+
+type originalFile struct {
+	Exists  bool
+	Content string
 }
 
 func (e *Evaluator) StartSnapshotSession(chatID string) *SnapshotSession {
@@ -26,7 +31,7 @@ func (e *Evaluator) StartSnapshotSession(chatID string) *SnapshotSession {
 		ID:        uuid.New().String(),
 		ChatID:    chatID,
 		StartTime: time.Now(),
-		Originals: make(map[string]string),
+		Originals: make(map[string]originalFile),
 		Changes:   make(map[string]workspace.FileChange),
 		Workspace: e.Workspace,
 	}
@@ -37,35 +42,16 @@ func (s *SnapshotSession) RecordFile(path string) error {
 		return nil
 	}
 
-	tmpDir := filepath.Join(s.Workspace.GetTeragenDir(), "_tmp", s.ID)
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return err
-	}
-
-	tmpPath := filepath.Join(tmpDir, uuid.New().String())
-
-	// Copy original to tmp
-	src, err := os.Open(path)
+	data, err := s.Workspace.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			s.Originals[path] = ""
+		if errors.Is(err, os.ErrNotExist) {
+			s.Originals[path] = originalFile{Exists: false, Content: ""}
 			return nil
 		}
 		return err
 	}
-	defer src.Close()
 
-	dst, err := os.Create(tmpPath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return err
-	}
-
-	s.Originals[path] = tmpPath
+	s.Originals[path] = originalFile{Exists: true, Content: string(data)}
 	return nil
 }
 
@@ -92,75 +78,96 @@ func (s *SnapshotSession) Commit(prevID string) (*workspace.Snapshot, error) {
 	// We'll iterate through all recorded originals and all explicit ops.
 	finalChanges := make(map[string]workspace.FileChange)
 
-	absRoot, _ := filepath.Abs(s.Workspace.Root)
+	absRoot := s.Workspace.Root()
 
 	// Process all files that were modified or might have been changed
-	for originalPath, tmpPath := range s.Originals {
+	for originalPath, orig := range s.Originals {
 		rel, _ := filepath.Rel(absRoot, originalPath)
 		change, hasExplicitOp := s.Changes[originalPath]
 
 		op := workspace.OpModify
-		content := ""
 
 		if hasExplicitOp {
 			op = change.Operation
-			if op == workspace.OpMove {
-				relNew, _ := filepath.Rel(absRoot, change.Content)
-				content = relNew
-			}
-		} else if tmpPath == "" {
+		} else if !orig.Exists {
 			op = workspace.OpCreate
 		}
 
-		if op == workspace.OpModify || op == workspace.OpCreate {
-			data, _ := os.ReadFile(originalPath)
-			content = string(data)
-			if op == workspace.OpModify && tmpPath != "" {
-				cmd := exec.Command("diff", "-u", tmpPath, originalPath)
-				output, _ := cmd.CombinedOutput()
-				content = string(output)
+		fc := workspace.FileChange{
+			Path:      filepath.ToSlash(rel),
+			Operation: op,
+		}
+
+		switch op {
+		case workspace.OpMove:
+			relNew, _ := filepath.Rel(absRoot, change.Content)
+			fc.Content = filepath.ToSlash(relNew)
+
+		case workspace.OpDelete:
+			// content before deletion
+			fc.Before = orig.Content
+
+		case workspace.OpCreate, workspace.OpModify:
+			afterData, err := s.Workspace.ReadFile(originalPath)
+			after := ""
+			if err == nil {
+				after = string(afterData)
+			}
+
+			before := ""
+			if orig.Exists {
+				before = orig.Content
+			}
+
+			fc.Before = before
+			fc.After = after
+
+			if op == workspace.OpCreate {
+				// Keep "Content" as full file content for rendering stats.
+				fc.Content = after
+			} else {
+				ud := difflib.UnifiedDiff{
+					A:        difflib.SplitLines(before),
+					B:        difflib.SplitLines(after),
+					FromFile: "a/" + filepath.ToSlash(rel),
+					ToFile:   "b/" + filepath.ToSlash(rel),
+					Context:  3,
+				}
+				diffText, _ := difflib.GetUnifiedDiffString(ud)
+				fc.Content = diffText
 			}
 		}
 
-		finalChanges[rel] = workspace.FileChange{
-			Path:      rel,
-			Operation: op,
-			Content:   content,
-		}
+		finalChanges[fc.Path] = fc
 	}
 
 	// Process explicit operations that didn't have an original file (like MKDIR or CREATE on non-existing path)
 	for path, change := range s.Changes {
 		rel, _ := filepath.Rel(absRoot, path)
+		rel = filepath.ToSlash(rel)
 		if _, ok := finalChanges[rel]; ok {
 			continue
 		}
 
 		op := change.Operation
-		content := change.Content // Might be new path for MOVE
-
-		if op == workspace.OpMove {
-			relNew, _ := filepath.Rel(absRoot, content)
-			content = relNew
-		} else if op == workspace.OpCreate || op == workspace.OpModify {
-			data, _ := os.ReadFile(path)
-			content = string(data)
+		fc := workspace.FileChange{Path: rel, Operation: op}
+		switch op {
+		case workspace.OpMove:
+			relNew, _ := filepath.Rel(absRoot, change.Content)
+			fc.Content = filepath.ToSlash(relNew)
+		case workspace.OpCreate, workspace.OpModify:
+			afterData, err := s.Workspace.ReadFile(path)
+			if err == nil {
+				fc.After = string(afterData)
+				fc.Content = fc.After
+			}
 		}
-
-		finalChanges[rel] = workspace.FileChange{
-			Path:      rel,
-			Operation: op,
-			Content:   content,
-		}
+		finalChanges[rel] = fc
 	}
 
 	for _, fc := range finalChanges {
 		snap.Files = append(snap.Files, fc)
 	}
-
-	// Clean up tmp
-	tmpDir := filepath.Join(s.Workspace.GetTeragenDir(), "_tmp", s.ID)
-	os.RemoveAll(tmpDir)
 
 	if err := s.Workspace.SaveSnapshot(snap); err != nil {
 		return nil, err
@@ -181,63 +188,77 @@ func (e *Evaluator) ApplySnapshot(snap *workspace.Snapshot, reverse bool) error 
 	}
 
 	for _, fc := range files {
-		absPath, err := e.SafeJoin(fc.Path)
+		absPath, err := e.Workspace.SafeJoin(fc.Path)
 		if err != nil {
 			return err
 		}
 
 		op := fc.Operation
-		if reverse {
-			switch op {
-			case workspace.OpCreate:
-				os.Remove(absPath)
-				continue
-			case workspace.OpDelete:
-				// We can't easily restore deleted files if we didn't save their content
-				continue
-			case workspace.OpMkdir:
-				os.Remove(absPath)
-				continue
-			case workspace.OpRmdir:
-				continue
-			case workspace.OpMove:
-				absNew, _ := e.SafeJoin(fc.Content)
-				os.Rename(absNew, absPath)
-				continue
-			case workspace.OpModify:
-				// Patch with -R handles it
-			}
-		}
-
 		switch op {
 		case workspace.OpCreate:
-			os.WriteFile(absPath, []byte(fc.Content), 0644)
-		case workspace.OpMkdir:
-			os.MkdirAll(absPath, 0755)
-		case workspace.OpRmdir:
-			os.RemoveAll(absPath)
-		case workspace.OpDelete:
-			os.Remove(absPath)
-		case workspace.OpMove:
-			absNew, _ := e.SafeJoin(fc.Content)
-			os.Rename(absPath, absNew)
-		case workspace.OpModify:
-			// Use patch
-			args := []string{}
 			if reverse {
-				args = append(args, "-R")
+				_ = e.Workspace.Remove(absPath)
+				continue
 			}
-			args = append(args, absPath)
-
-			cmd := exec.Command("patch", args...)
-			stdin, _ := cmd.StdinPipe()
-			go func() {
-				defer stdin.Close()
-				io.WriteString(stdin, fc.Content)
-			}()
-
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("patch error: %v, output: %s", err, string(output))
+			if err := e.Workspace.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+				return err
+			}
+			content := fc.After
+			if content == "" {
+				content = fc.Content
+			}
+			if err := e.Workspace.WriteFile(absPath, []byte(content)); err != nil {
+				return err
+			}
+		case workspace.OpMkdir:
+			if reverse {
+				_ = e.Workspace.RemoveAll(absPath)
+				continue
+			}
+			if err := e.Workspace.MkdirAll(absPath, 0o755); err != nil {
+				return err
+			}
+		case workspace.OpRmdir:
+			if reverse {
+				if err := e.Workspace.MkdirAll(absPath, 0o755); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := e.Workspace.RemoveAll(absPath); err != nil {
+				return err
+			}
+		case workspace.OpDelete:
+			if reverse {
+				if fc.Before == "" {
+					continue
+				}
+				if err := e.Workspace.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+					return err
+				}
+				if err := e.Workspace.WriteFile(absPath, []byte(fc.Before)); err != nil {
+					return err
+				}
+				continue
+			}
+			_ = e.Workspace.Remove(absPath)
+		case workspace.OpMove:
+			absNew, _ := e.Workspace.SafeJoin(fc.Content)
+			if reverse {
+				_ = e.Workspace.Rename(absNew, absPath)
+				continue
+			}
+			_ = e.Workspace.Rename(absPath, absNew)
+		case workspace.OpModify:
+			if err := e.Workspace.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+				return err
+			}
+			content := fc.After
+			if reverse {
+				content = fc.Before
+			}
+			if err := e.Workspace.WriteFile(absPath, []byte(content)); err != nil {
+				return fmt.Errorf("modify error: %v", err)
 			}
 		}
 	}

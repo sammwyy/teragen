@@ -2,33 +2,12 @@ package evaluator
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/sammwy/teragen/internal/workspace"
 )
-
-// SafeJoin joins the workspace root with a path and ensures no path traversal.
-func (e *Evaluator) SafeJoin(target string) (string, error) {
-	absRoot, err := filepath.Abs(e.Workspace.Root)
-	if err != nil {
-		return "", err
-	}
-
-	joined := filepath.Join(absRoot, target)
-	absJoined, err := filepath.Abs(joined)
-	if err != nil {
-		return "", err
-	}
-
-	if !strings.HasPrefix(absJoined, absRoot) {
-		return "", fmt.Errorf("path traversal attempt: %s", target)
-	}
-
-	return absJoined, nil
-}
 
 // ValidateFilename ensures the filename is valid for the OS.
 func ValidateFilename(name string) error {
@@ -54,12 +33,12 @@ func (e *Evaluator) registerFSTools() {
 		"required": []string{"target"},
 	}, func(agentID string, args map[string]any) (string, error) {
 		target, _ := args["target"].(string)
-		path, err := e.SafeJoin(target)
+		path, err := e.Workspace.SafeJoin(target)
 		if err != nil {
 			return "", err
 		}
 
-		data, err := os.ReadFile(path)
+		data, err := e.Workspace.ReadFile(path)
 		if err != nil {
 			return "", err
 		}
@@ -105,18 +84,27 @@ func (e *Evaluator) registerFSTools() {
 		file, _ := args["file"].(string)
 		content, _ := args["content"].(string)
 
-		path, err := e.SafeJoin(file)
+		path, err := e.Workspace.SafeJoin(file)
 		if err != nil {
 			return "", err
 		}
 
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := e.Workspace.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return "", err
 		}
 
 		e.RecordFile(path)
-		e.ActiveSnapshot.RecordOp(path, workspace.OpCreate)
-		err = os.WriteFile(path, []byte(content), 0644)
+
+		// Determine create vs modify (best-effort)
+		op := workspace.OpCreate
+		if _, err := e.Workspace.ReadFile(path); err == nil {
+			op = workspace.OpModify
+		}
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(path, op)
+		}
+
+		err = e.Workspace.WriteFile(path, []byte(content))
 		if err != nil {
 			return "", err
 		}
@@ -135,12 +123,12 @@ func (e *Evaluator) registerFSTools() {
 			target = v
 		}
 
-		path, err := e.SafeJoin(target)
+		path, err := e.Workspace.SafeJoin(target)
 		if err != nil {
 			return "", err
 		}
 
-		entries, err := os.ReadDir(path)
+		entries, err := e.Workspace.ReadDir(path)
 		if err != nil {
 			return "", err
 		}
@@ -148,10 +136,10 @@ func (e *Evaluator) registerFSTools() {
 		var out []string
 		for _, entry := range entries {
 			typeStr := "F"
-			if entry.IsDir() {
+			if entry.IsDir {
 				typeStr = "D"
 			}
-			out = append(out, fmt.Sprintf("[%s] %s", typeStr, entry.Name()))
+			out = append(out, fmt.Sprintf("[%s] %s", typeStr, entry.Name))
 		}
 		return strings.Join(out, "\n"), nil
 	})
@@ -165,14 +153,14 @@ func (e *Evaluator) registerFSTools() {
 		"required": []string{"name"},
 	}, func(agentID string, args map[string]any) (string, error) {
 		name, _ := args["name"].(string)
-		path, err := e.SafeJoin(name)
+		path, err := e.Workspace.SafeJoin(name)
 		if err != nil {
 			return "", err
 		}
 		if e.ActiveSnapshot != nil {
 			e.ActiveSnapshot.RecordOp(path, workspace.OpMkdir)
 		}
-		err = os.MkdirAll(path, 0755)
+		err = e.Workspace.MkdirAll(path, 0o755)
 		if err != nil {
 			return "", err
 		}
@@ -190,13 +178,18 @@ func (e *Evaluator) registerFSTools() {
 	}, func(agentID string, args map[string]any) (string, error) {
 		file, _ := args["file"].(string)
 		content, _ := args["content"].(string)
-		path, err := e.SafeJoin(file)
+		path, err := e.Workspace.SafeJoin(file)
 		if err != nil {
 			return "", err
 		}
+		if err := e.Workspace.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return "", err
+		}
 		e.RecordFile(path)
-		e.ActiveSnapshot.RecordOp(path, workspace.OpModify)
-		err = os.WriteFile(path, []byte(content), 0644)
+		if e.ActiveSnapshot != nil {
+			e.ActiveSnapshot.RecordOp(path, workspace.OpModify)
+		}
+		err = e.Workspace.WriteFile(path, []byte(content))
 		return "File modified", err
 	})
 
@@ -209,7 +202,7 @@ func (e *Evaluator) registerFSTools() {
 		"required": []string{"name"},
 	}, func(agentID string, args map[string]any) (string, error) {
 		name, _ := args["name"].(string)
-		path, err := e.SafeJoin(name)
+		path, err := e.Workspace.SafeJoin(name)
 		if err != nil {
 			return "", err
 		}
@@ -217,7 +210,7 @@ func (e *Evaluator) registerFSTools() {
 		if e.ActiveSnapshot != nil {
 			e.ActiveSnapshot.RecordOp(path, workspace.OpDelete)
 		}
-		err = os.Remove(path)
+		err = e.Workspace.Remove(path)
 		return "File deleted", err
 	})
 
@@ -230,14 +223,14 @@ func (e *Evaluator) registerFSTools() {
 		"required": []string{"name"},
 	}, func(agentID string, args map[string]any) (string, error) {
 		name, _ := args["name"].(string)
-		path, err := e.SafeJoin(name)
+		path, err := e.Workspace.SafeJoin(name)
 		if err != nil {
 			return "", err
 		}
 		if e.ActiveSnapshot != nil {
 			e.ActiveSnapshot.RecordOp(path, workspace.OpRmdir)
 		}
-		err = os.RemoveAll(path)
+		err = e.Workspace.RemoveAll(path)
 		return "Directory removed", err
 	})
 
@@ -252,18 +245,18 @@ func (e *Evaluator) registerFSTools() {
 	}, func(agentID string, args map[string]any) (string, error) {
 		oldPath, _ := args["old"].(string)
 		newPath, _ := args["new"].(string)
-		src, err := e.SafeJoin(oldPath)
+		src, err := e.Workspace.SafeJoin(oldPath)
 		if err != nil {
 			return "", err
 		}
-		dst, err := e.SafeJoin(newPath)
+		dst, err := e.Workspace.SafeJoin(newPath)
 		if err != nil {
 			return "", err
 		}
 		if e.ActiveSnapshot != nil {
 			e.ActiveSnapshot.RecordOp(src, workspace.OpMove, dst)
 		}
-		err = os.Rename(src, dst)
+		err = e.Workspace.Rename(src, dst)
 		return "Moved successfully", err
 	})
 
@@ -282,11 +275,8 @@ func (e *Evaluator) registerFSTools() {
 		}
 
 		var matches []string
-		err = filepath.Walk(e.Workspace.Root, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			rel, _ := filepath.Rel(e.Workspace.Root, p)
+		err = e.Workspace.Walk(".", func(rel string, isDir bool) error {
+			_ = isDir
 			if re.MatchString(rel) {
 				matches = append(matches, rel)
 			}

@@ -19,7 +19,7 @@ type Agent struct {
 	Config         *config.AppConfig
 	Evaluator      *evaluator.Evaluator
 	History        []ai.Message
-	Workspace      *workspace.Workspace
+	Workspace      workspace.Workspace
 	ID             string
 	ActiveChatID   string
 	SystemPrompt   string
@@ -27,14 +27,9 @@ type Agent struct {
 	mu             sync.Mutex
 }
 
-func NewAgent(session ...workspace.AgentSession) (*Agent, error) {
+func NewAgent(ws workspace.Workspace, session ...workspace.AgentSession) (*Agent, error) {
 	appCfg, err := config.LoadAppConfig()
 	if err != nil {
-		return nil, err
-	}
-
-	ws := workspace.NewWorkspace(".")
-	if err := ws.EnsureDirectories(); err != nil {
 		return nil, err
 	}
 

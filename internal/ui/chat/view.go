@@ -330,6 +330,10 @@ func (m *Model) renderSpinnerEntry(width int) string {
 }
 
 func (m *Model) View() string {
+	if m.shouldShowFirstConversation() {
+		return m.viewFirstConversation()
+	}
+
 	w := m.width
 	if w < 10 {
 		w = 80
@@ -445,12 +449,19 @@ func (m *Model) renderBottomBorder(width int) string {
 		chatID = ag.ActiveChatID
 		leftTag = fmt.Sprintf(" #%s ", chatID)
 
+		engineID := "?"
+		if ag.Workspace != nil {
+			engineID = string(ag.Workspace.EngineID())
+		}
+
 		if ag.ActiveProvider != nil {
 			leftTag += "│ " + statusProviderStyle.Render(ag.ActiveProvider.DisplayName) +
 				statusSepStyle.Render(" › ") +
-				statusModelStyle.Render(ag.ActiveProvider.Model) + " "
+				statusModelStyle.Render(ag.ActiveProvider.Model) + " " +
+				statusSepStyle.Render("│ ") +
+				statusEngineStyle.Render(engineID) + " "
 		} else {
-			leftTag += "│ No provider "
+			leftTag += "│ No provider " + statusSepStyle.Render("│ ") + statusEngineStyle.Render(engineID) + " "
 		}
 	} else {
 		leftTag = " #? │ No Agent "
@@ -475,4 +486,81 @@ func (m *Model) renderBottomBorder(width int) string {
 	return bottomBorderStyle.Render("╰") + leftTag +
 		bottomBorderStyle.Render(strings.Repeat("─", middleLen)) +
 		rightTag + bottomBorderStyle.Render("╯")
+}
+
+func (m *Model) shouldShowFirstConversation() bool {
+	if m.activeAgentID == "" || m.activeAgentID == "+" {
+		return false
+	}
+	ag, ok := m.core.Agents[m.activeAgentID]
+	if !ok || ag == nil || ag.Workspace == nil {
+		return false
+	}
+	if len(ag.History) > 0 {
+		return false
+	}
+	return !ag.Workspace.Initialized()
+}
+
+func (m *Model) viewFirstConversation() string {
+	w := m.width
+	h := m.height
+	if w < 10 {
+		w = 80
+	}
+	if h < 5 {
+		h = 24
+	}
+
+	ag := m.core.Agents[m.activeAgentID]
+
+	// Provider/model + engine status (bottom)
+	provider := "No provider"
+	model := ""
+	if ag != nil && ag.ActiveProvider != nil {
+		provider = ag.ActiveProvider.DisplayName
+		model = ag.ActiveProvider.Model
+	}
+	engine := "?"
+	if ag != nil && ag.Workspace != nil {
+		engine = string(ag.Workspace.EngineID())
+	}
+
+	status := " " + statusProviderStyle.Render(provider)
+	if model != "" {
+		status += statusSepStyle.Render(" › ") + statusModelStyle.Render(model)
+	}
+	status += statusSepStyle.Render(" │ ") + statusEngineStyle.Render(engine) + " "
+	status = statusBarBase.Width(w).Render(status)
+
+	// ASCII logo (centered)
+	logoLines := []string{
+		"████████╗███████╗██████╗  █████╗  ██████╗ ███████╗███╗   ██╗",
+		"╚══██╔══╝██╔════╝██╔══██╗██╔══██╗██╔════╝ ██╔════╝████╗  ██║",
+		"   ██║   █████╗  ██████╔╝███████║██║  ███╗█████╗  ██╔██╗ ██║",
+		"   ██║   ██╔══╝  ██╔══██╗██╔══██║██║   ██║██╔══╝  ██║╚██╗██║",
+		"   ██║   ███████╗██║  ██║██║  ██║╚██████╔╝███████╗██║ ╚████║",
+		"   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝",
+	}
+
+	logoStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(theme.ColorVibrantCyan)).
+		Bold(true)
+
+	var centeredLogo []string
+	for _, l := range logoLines {
+		centeredLogo = append(centeredLogo, lipgloss.PlaceHorizontal(w, lipgloss.Center, logoStyle.Render(l)))
+	}
+
+	input := lipgloss.PlaceHorizontal(w, lipgloss.Center, m.textInput.View())
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Center,
+		strings.Join(centeredLogo, "\n"),
+		"",
+		input,
+	)
+
+	body := lipgloss.Place(w, h-1, lipgloss.Center, lipgloss.Center, content)
+	return body + "\n" + status
 }

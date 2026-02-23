@@ -29,6 +29,10 @@ var (
 				Foreground(lipgloss.Color(theme.ColorElectricBlue)).
 				Bold(true)
 
+	statusEngineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(theme.ColorVibrantPink)).
+				Bold(true)
+
 	statusSepStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(theme.ColorDim))
 

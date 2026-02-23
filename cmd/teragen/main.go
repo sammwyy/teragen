@@ -1,8 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sammwy/teragen/internal/agent"
 	"github.com/sammwy/teragen/internal/config"
@@ -14,6 +17,40 @@ import (
 )
 
 func main() {
+	// ── CLI args ──────────────────────────────────────────────────────────────
+	// First arg may be the workspace path:
+	//   teragen ./myproject
+	//   teragen ./myproject -e
+	//   teragen -e
+	root := "."
+	rest := os.Args[1:]
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		root = rest[0]
+		rest = rest[1:]
+	}
+
+	fs := flag.NewFlagSet("teragen", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	ephemeral := false
+	mockFS := false
+	fs.BoolVar(&ephemeral, "e", false, "Ephemeral mode (do not read/write workspace metadata)")
+	fs.BoolVar(&ephemeral, "ephemeral", false, "Ephemeral mode (do not read/write workspace metadata)")
+	fs.BoolVar(&mockFS, "m", false, "Mock filesystem for LLM tools (in-memory)")
+	fs.BoolVar(&mockFS, "mock", false, "Mock filesystem for LLM tools (in-memory)")
+	if err := fs.Parse(rest); err != nil {
+		os.Exit(2)
+	}
+
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid workspace path: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Chdir(absRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "Could not open workspace: %v\n", err)
+		os.Exit(1)
+	}
+
 	// ── First-run detection ──────────────────────────────────────────────────
 	// If config.json doesn't exist (or has no active provider), run the setup
 	// wizard before starting the main chat UI.
@@ -32,7 +69,17 @@ func main() {
 		}
 	}
 
-	ws := workspace.NewWorkspace(".")
+	baseWS := workspace.NewCwdWorkspace(absRoot)
+	var ws workspace.Workspace
+	switch {
+	case mockFS:
+		ws = workspace.NewMemoryWorkspace(absRoot)
+	case ephemeral:
+		ws = workspace.NewEphemeralWorkspace(baseWS)
+	default:
+		ws = baseWS
+	}
+
 	sessions, err := ws.LoadAgents()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading agents: %v\n", err)
@@ -44,9 +91,9 @@ func main() {
 		activeAgentID = sessions[0].ID
 	}
 
-	cr := core.NewCore(nil) // We'll set the processor properly
+	cr := core.NewCore(nil, ws) // We'll set the processor properly
 	for _, s := range sessions {
-		ag, err := agent.NewAgent(s)
+		ag, err := agent.NewAgent(ws, s)
 		if err != nil {
 			continue
 		}

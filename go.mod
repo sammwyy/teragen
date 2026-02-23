@@ -12,6 +12,7 @@ require (
 	github.com/denisbrodbeck/machineid v1.0.1
 	github.com/google/uuid v1.6.0
 	github.com/lucasb-eyer/go-colorful v1.3.0
+	github.com/pmezard/go-difflib v1.0.0
 )
 
 require (

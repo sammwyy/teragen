@@ -40,13 +40,15 @@ type Core struct {
 	AgentIDs    []string
 	Subscribers []Subscriber
 	Processor   *processor.Processor
+	Workspace   workspace.Workspace
 	mu          sync.RWMutex
 }
 
-func NewCore(p *processor.Processor) *Core {
+func NewCore(p *processor.Processor, ws workspace.Workspace) *Core {
 	return &Core{
 		Agents:    make(map[string]*agent.Agent),
 		Processor: p,
+		Workspace: ws,
 	}
 }
 
@@ -90,7 +92,7 @@ func (c *Core) CreateAgent() (string, *agent.Agent, error) {
 	newID := fmt.Sprintf("%d", max+1)
 	c.mu.Unlock()
 
-	ag, err := agent.NewAgent(workspace.AgentSession{
+	ag, err := agent.NewAgent(c.Workspace, workspace.AgentSession{
 		ID: newID,
 	})
 	if err != nil {
